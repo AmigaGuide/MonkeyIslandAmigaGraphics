@@ -28,7 +28,6 @@ CHUNK_LABELS = {
 }
 
 
-
 def parse_lec_header_and_fo(filepath):
     with open(filepath, 'rb') as f:
         raw_data = f.read()
@@ -79,7 +78,6 @@ def parse_lec_header_and_fo(filepath):
         lf_size = int.from_bytes(data[file_pointer:file_pointer + 4], 'little')
         lf_data = data[file_pointer : file_pointer + lf_size]
         parse_lf(lf_data, i + 1, fo_id_byte)
-
 
 
 def parse_lf(lf_data, file_index, fo_id_byte):
@@ -151,42 +149,109 @@ def parse_ro(ro_data, file_index):
 
     print("  Contained subchunks in RO:")
     while pointer + 6 <= len(ro_data):
-        chunk_size = int.from_bytes(ro_data[pointer:pointer + 4], 'little')
-        chunk_id = ro_data[pointer + 4:pointer + 6].decode('ascii', errors='ignore')
+        chunk_size = int.from_bytes(
+            ro_data[pointer:pointer + 4],
+            'little'
+        )
+
+        chunk_id = ro_data[
+            pointer + 4:pointer + 6
+        ].decode('ascii', errors='ignore')
+
         label = CHUNK_LABELS.get(chunk_id, '?')
 
-        print(f"    Offset {pointer:>5}: ID='{chunk_id}', Label='{label}', Size={chunk_size} bytes")
-        contents.append((pointer, chunk_id, chunk_size))
-        chunk_counts[chunk_id] = chunk_counts.get(chunk_id, 0) + 1
+        print(
+            f"    Offset {pointer:>5}: "
+            f"ID='{chunk_id}', "
+            f"Label='{label}', "
+            f"Size={chunk_size} bytes"
+        )
+
+        contents.append(
+            (pointer, chunk_id, chunk_size)
+        )
+
+        chunk_counts[chunk_id] = (
+            chunk_counts.get(chunk_id, 0) + 1
+        )
+
         pointer += chunk_size
 
         if pointer == len(ro_data):
             print("  End of RO block reached cleanly.")
             break
+
         elif pointer > len(ro_data):
-            print("  Warning: last subchunk extends beyond RO block.")
+            print(
+                "  Warning: last subchunk extends "
+                "beyond RO block."
+            )
             break
 
     print("  Subchunk counts:")
     for chunk_id, count in chunk_counts.items():
         label = CHUNK_LABELS.get(chunk_id, '?')
-        print(f"    {chunk_id}: {count} ({label})")
+        print(
+            f"    {chunk_id}: {count} ({label})"
+        )
 
     if chunk_counts.get('BM', 0) == 0:
-        print("  No BM chunk found — skipping detailed parsing.")
+        print(
+            "  No BM chunk found — skipping "
+            "detailed parsing."
+        )
         return
 
+    # Values required later by the BM decoder.
+    width = None
+    height = None
+    palette_rgb = None
+
     for offset, chunk_id, chunk_size in contents:
+
         if chunk_id == 'HD':
-            hd_data = ro_data[offset : offset + chunk_size]
-            parse_hd(hd_data)
+            hd_data = ro_data[
+                offset:offset + chunk_size
+            ]
+
+            width, height = parse_hd(hd_data)
+
         elif chunk_id == 'PA':
-            pa_data = ro_data[offset : offset + chunk_size]
-            parse_pa(pa_data, file_index)
+            pa_data = ro_data[
+                offset:offset + chunk_size
+            ]
+
+            palette_rgb = parse_pa(
+                pa_data,
+                file_index
+            )
+
         elif chunk_id == 'BM':
-            bm_data = ro_data[offset : offset + chunk_size]
-            #parse_bm(bm_data)
-            parse_bm(bm_data, file_index)
+            bm_data = ro_data[
+                offset:offset + chunk_size
+            ]
+
+            if width is None or height is None:
+                print(
+                    "  Cannot decode BM: room dimensions "
+                    "are unavailable."
+                )
+                continue
+
+            if palette_rgb is None:
+                print(
+                    "  Cannot decode BM: room palette "
+                    "is unavailable."
+                )
+                continue
+
+            parse_bm(
+                bm_data,
+                file_index,
+                width,
+                height,
+                palette_rgb
+            )
 
 
 def parse_hd(hd_data):
@@ -202,8 +267,7 @@ def parse_hd(hd_data):
     print(f"    Room dimensions: {width} x {height}")
     print(f"    Number of objects: {num_objects}")
 
-
-
+    return width, height
 
 
 def parse_pa(pa_data, room_index=None):
@@ -277,6 +341,269 @@ def parse_pa(pa_data, room_index=None):
     img.save(filename)
     print(f"    Palette image saved as '{filename}'")
 
+    return colours
+
+
+def decode_strip_ega(strip_payload, height):
+    """
+    Decode one 8-pixel-wide SCUMM EGA-style strip.
+
+    This is a Python adaptation of ScummVM's drawStripEGA()
+    routine, used by BMCOMP_PIX32 (0x0A) for the Amiga
+    version of The Secret of Monkey Island.
+
+    Returns:
+        columns: 8 columns of palette-index nibbles (0-15)
+        src:     number of payload bytes consumed
+    """
+
+    columns = [
+        [0 for _ in range(height)]
+        for _ in range(8)
+    ]
+
+    src = 0
+    x = 0
+    y = 0
+
+    def write_pixel(colour):
+        nonlocal x, y
+
+        if x >= 8:
+            raise ValueError(
+                "Decoder attempted to write beyond "
+                "the 8-pixel strip width."
+            )
+
+        columns[x][y] = colour
+
+        y += 1
+
+        if y >= height:
+            y = 0
+            x += 1
+
+    while x < 8:
+
+        if src >= len(strip_payload):
+            raise ValueError(
+                f"Strip data ended early at column {x}, row {y}."
+            )
+
+        colour = strip_payload[src]
+        src += 1
+
+        # ----------------------------------------------------------
+        # 1xxxxxxx
+        # ----------------------------------------------------------
+        if colour & 0x80:
+
+            run = colour & 0x3F
+
+            # ------------------------------------------------------
+            # 11xxxxxx
+            #
+            # Alternate between two colours.
+            # ------------------------------------------------------
+            if colour & 0x40:
+
+                if src >= len(strip_payload):
+                    raise ValueError(
+                        "Missing alternating colour byte."
+                    )
+
+                colour_pair = strip_payload[src]
+                src += 1
+
+                if run == 0:
+
+                    if src >= len(strip_payload):
+                        raise ValueError(
+                            "Missing extended alternating run length."
+                        )
+
+                    run = strip_payload[src]
+                    src += 1
+
+                high_colour = (colour_pair >> 4) & 0x0F
+                low_colour = colour_pair & 0x0F
+
+                for z in range(run):
+
+                    if z & 1:
+                        write_pixel(low_colour)
+                    else:
+                        write_pixel(high_colour)
+
+            # ------------------------------------------------------
+            # 10xxxxxx
+            #
+            # Copy from previous column.
+            # ------------------------------------------------------
+            else:
+
+                if run == 0:
+
+                    if src >= len(strip_payload):
+                        raise ValueError(
+                            "Missing extended copy run length."
+                        )
+
+                    run = strip_payload[src]
+                    src += 1
+
+                for _ in range(run):
+
+                    if x == 0:
+                        raise ValueError(
+                            "Previous-column copy encountered "
+                            "while decoding column 0."
+                        )
+
+                    colour_from_previous_column = columns[x - 1][y]
+
+                    write_pixel(
+                        colour_from_previous_column
+                    )
+
+        # ----------------------------------------------------------
+        # 0xxxxxxx
+        #
+        # Solid colour run.
+        # ----------------------------------------------------------
+        else:
+
+            run = colour >> 4
+
+            if run == 0:
+
+                if src >= len(strip_payload):
+                    raise ValueError(
+                        "Missing extended solid run length."
+                    )
+
+                run = strip_payload[src]
+                src += 1
+
+            solid_colour = colour & 0x0F
+
+            for _ in range(run):
+                write_pixel(solid_colour)
+
+    return columns, src
+
+
+def save_room_image(
+    bm_raw,
+    strip_offsets,
+    smap_length,
+    width,
+    height,
+    palette_rgb,
+    file_number
+):
+    """
+    Decode all BMCOMP_PIX32 strips and assemble the room image.
+
+    The Amiga version of Monkey Island uses 4-bit decoded colour
+    values mapped through palette entries 16-31.
+    """
+
+    if len(palette_rgb) < 32:
+        raise ValueError(
+            f"Room palette contains only {len(palette_rgb)} colours; "
+            "32 are required."
+        )
+
+    strip_count = len(strip_offsets)
+
+    if strip_count * 8 != width:
+        raise ValueError(
+            f"Strip count does not match room width: "
+            f"{strip_count} strips = {strip_count * 8} pixels, "
+            f"room width = {width}."
+        )
+
+    # Store final RGB pixels row-major.
+    pixels = [
+        [(0, 0, 0) for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    for strip_index, strip_start in enumerate(strip_offsets):
+
+        if strip_index + 1 < strip_count:
+            strip_end = strip_offsets[strip_index + 1]
+        else:
+            strip_end = smap_length
+
+        if strip_start >= strip_end:
+            raise ValueError(
+                f"Strip {strip_index}: invalid range "
+                f"{strip_start}..{strip_end}."
+            )
+
+        compression_code = bm_raw[strip_start]
+
+        if compression_code != 0x0A:
+            raise ValueError(
+                f"Strip {strip_index}: unsupported compression "
+                f"code 0x{compression_code:02X}."
+            )
+
+        strip_payload = bm_raw[
+            strip_start + 1:strip_end
+        ]
+
+        columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        if bytes_used != len(strip_payload):
+            raise ValueError(
+                f"Strip {strip_index}: decoder used {bytes_used} "
+                f"of {len(strip_payload)} payload bytes."
+            )
+
+        base_x = strip_index * 8
+
+        for column_index in range(8):
+            x = base_x + column_index
+
+            for y in range(height):
+                colour_nibble = columns[column_index][y]
+
+                palette_index = colour_nibble + 16
+
+                pixels[y][x] = palette_rgb[palette_index]
+
+    image = Image.new(
+        'RGB',
+        (width, height)
+    )
+
+    flat_pixels = [
+        pixel
+        for row in pixels
+        for pixel in row
+    ]
+
+    image.putdata(flat_pixels)
+
+    os.makedirs(
+        'Rooms',
+        exist_ok=True
+    )
+
+    filename = f'Rooms/room_{file_number}.png'
+
+    image.save(filename)
+
+    print(
+        f"  Room image saved as '{filename}' "
+        f"({width}x{height})"
+    )
 
 
 def parse_bm(bm_data, file_number, width, height, palette_rgb):
@@ -302,8 +629,123 @@ def parse_bm(bm_data, file_number, width, height, palette_rgb):
         f.write(bm_raw)
 
     # Try decoding and rendering images from 4-bitplane RLE
-    save_bitplane_images_and_combined(bm_raw, width, height, 4, file_number, palette_rgb)
+    #save_bitplane_images_and_combined(bm_raw, width, height, 4, file_number, palette_rgb)
+    strip_count = (width + 7) // 8
 
+    smap_length = int.from_bytes(
+        bm_raw[0:4],
+        'little'
+    )
+
+    print(f"  SMAP length: {smap_length} bytes")
+    print(f"  Room requires {strip_count} strips")
+
+    strip_offsets = []
+
+    for strip_index in range(strip_count):
+        offset_pos = 4 + strip_index * 4
+
+        strip_offset = int.from_bytes(
+            bm_raw[offset_pos:offset_pos + 4],
+            'little'
+        )
+
+        strip_offsets.append(strip_offset)
+
+        print(
+            f"    Strip {strip_index:02}: "
+            f"offset {strip_offset}"
+        )
+
+    try:
+        save_room_image(
+            bm_raw,
+            strip_offsets,
+            smap_length,
+            width,
+            height,
+            palette_rgb,
+            file_number
+        )
+
+    except ValueError as error:
+        print(
+            f"  Room image decode failed: {error}"
+        )
+
+    strip_index = 0
+    strip_start = strip_offsets[strip_index]
+    strip_end = strip_offsets[strip_index + 1]
+
+    compression_code = bm_raw[strip_start]
+    strip_payload = bm_raw[strip_start + 1:strip_end]
+
+    try:
+        decoded_columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        print()
+        print("  Decoded strip check")
+        print(f"    Columns decoded:    {len(decoded_columns)}")
+        print(f"    Pixels per column:  {height}")
+        print(f"    Total pixels:       {8 * height}")
+        print(f"    Payload bytes used: {bytes_used}")
+        print(f"    Payload bytes avail:{len(strip_payload)}")
+
+        print("    First 16 pixels of each column:")
+
+        for column_index, column in enumerate(decoded_columns):
+            pixels = ' '.join(
+                f'{value:02d}'
+                for value in column[:16]
+            )
+
+            print(
+                f"      Column {column_index}: {pixels}"
+            )
+
+    except ValueError as error:
+        print()
+        print(f"  Strip decode failed: {error}")
+
+    print()
+    print("  Chunk check - first strip")
+    print(f"    Strip index:       {strip_index}")
+    print(f"    Strip start:       {strip_start}")
+    print(f"    Strip end:         {strip_end}")
+    print(f"    Total strip bytes: {strip_end - strip_start}")
+    print(f"    Compression code:  0x{compression_code:02X}")
+    print(f"    Payload bytes:     {len(strip_payload)}")
+
+    preview = ' '.join(f'{b:02X}' for b in strip_payload[:32])
+    print(f"    First 32 payload bytes:")
+    print(f"      {preview}")
+
+    print("  Strip compression bytes:")
+
+    for strip_index, strip_offset in enumerate(strip_offsets):
+        compression_code = bm_raw[strip_offset]
+
+        print(
+            f"    Strip {strip_index:02}: "
+            f"offset {strip_offset}, "
+            f"compression byte = 0x{compression_code:02X} "
+            f"({compression_code})"
+        )
+
+    expected_first_offset = 4 + strip_count * 4
+
+    print(
+        f"  Expected first strip offset: "
+        f"{expected_first_offset}"
+    )
+
+    print(
+        f"  Actual first strip offset:   "
+        f"{strip_offsets[0]}"
+    )
 
 
 def decode_scumm_rle(bm_raw, width, height, bitplanes):
@@ -333,6 +775,7 @@ def decode_scumm_rle(bm_raw, width, height, bitplanes):
 
     return decoded_planes
 
+
 def extract_bitplane_image(plane_data, width, height):
     row_bytes = ((width + 15) // 16) * 2
     img = Image.new('L', (width, height))
@@ -348,6 +791,7 @@ def extract_bitplane_image(plane_data, width, height):
                     value = 255 if (byte & (1 << bit)) else 0
                     pixels[x, y] = value
     return img
+
 
 def combine_bitplanes(bitplanes, width, height):
     img = Image.new('P', (width, height))
@@ -368,9 +812,11 @@ def combine_bitplanes(bitplanes, width, height):
                     pixels[x, y] = colour_index
     return img
 
+
 def set_palette_amiga(image, palette_rgb):
     flat_palette = [val for rgb in palette_rgb[:16] for val in rgb]
     image.putpalette(flat_palette + [0] * (768 - len(flat_palette)))
+
 
 def save_bitplane_images_and_combined(bm_raw, width, height, bitplanes, file_number, palette_rgb):
     os.makedirs("Bitplane_Images", exist_ok=True)
@@ -388,4 +834,4 @@ def save_bitplane_images_and_combined(bm_raw, width, height, bitplanes, file_num
 
 # Entry point
 if __name__ == '__main__':
-    parse_lec_header_and_fo('disk01.lec')
+    parse_lec_header_and_fo('resource/disk01.lec')

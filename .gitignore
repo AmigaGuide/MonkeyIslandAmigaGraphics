@@ -1,9 +1,6 @@
 # Original game resources - copyrighted material
 resource/
 
-# Generated graphics
-output/
-
 # Python cache
 __pycache__/
 *.py[cod]
@@ -15,3 +12,8 @@ venv/
 # IDE/editor files
 .vscode/
 .idea/
+
+# Generated output
+Palettes/
+Rooms/
+bm_raw/
