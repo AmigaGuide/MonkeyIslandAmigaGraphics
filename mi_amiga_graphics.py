@@ -505,8 +505,12 @@ def save_room_image(
     """
     Decode all BMCOMP_PIX32 strips and assemble the room image.
 
-    The Amiga version of Monkey Island uses 4-bit decoded colour
-    values mapped through palette entries 16-31.
+    The Amiga version of The Secret of Monkey Island decodes to
+    4-bit colour values (0-15), which map to room palette entries
+    16-31.
+
+    The resulting PNG is saved as an indexed-colour image using
+    exactly those 16 room colours.
     """
 
     if len(palette_rgb) < 32:
@@ -524,9 +528,9 @@ def save_room_image(
             f"room width = {width}."
         )
 
-    # Store final RGB pixels row-major.
+    # Store 4-bit palette indices directly.
     pixels = [
-        [(0, 0, 0) for _ in range(width)]
+        [0 for _ in range(width)]
         for _ in range(height)
     ]
 
@@ -572,14 +576,11 @@ def save_room_image(
             x = base_x + column_index
 
             for y in range(height):
-                colour_nibble = columns[column_index][y]
+                pixels[y][x] = columns[column_index][y]
 
-                palette_index = colour_nibble + 16
-
-                pixels[y][x] = palette_rgb[palette_index]
-
+    # Create indexed-colour image.
     image = Image.new(
-        'RGB',
+        'P',
         (width, height)
     )
 
@@ -591,6 +592,20 @@ def save_room_image(
 
     image.putdata(flat_pixels)
 
+    # Pillow palettes must contain up to 256 RGB entries.
+    # We use source palette entries 16-31 as PNG entries 0-15.
+    png_palette = []
+
+    for r, g, b in palette_rgb[16:32]:
+        png_palette.extend([r, g, b])
+
+    # Pad remaining palette entries to 256 colours.
+    png_palette.extend(
+        [0, 0, 0] * (256 - 16)
+    )
+
+    image.putpalette(png_palette)
+
     os.makedirs(
         'Rooms',
         exist_ok=True
@@ -598,11 +613,14 @@ def save_room_image(
 
     filename = f'Rooms/room_{file_number}.png'
 
-    image.save(filename)
+    image.save(
+        filename,
+        optimize=True
+    )
 
     print(
-        f"  Room image saved as '{filename}' "
-        f"({width}x{height})"
+        f"  Indexed room image saved as '{filename}' "
+        f"({width}x{height}, 16 colours)"
     )
 
 
