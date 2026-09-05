@@ -28,7 +28,7 @@ CHUNK_LABELS = {
 }
 
 
-def parse_lec_header_and_fo(filepath):
+def parse_lec_header_and_fo(filepath, disk_number):
     with open(filepath, 'rb') as f:
         raw_data = f.read()
 
@@ -77,10 +77,21 @@ def parse_lec_header_and_fo(filepath):
 
         lf_size = int.from_bytes(data[file_pointer:file_pointer + 4], 'little')
         lf_data = data[file_pointer : file_pointer + lf_size]
-        parse_lf(lf_data, i + 1, fo_id_byte)
+
+        parse_lf(
+            lf_data,
+            i + 1,
+            fo_id_byte,
+            disk_number
+        )
 
 
-def parse_lf(lf_data, file_index, fo_id_byte):
+def parse_lf(
+    lf_data,
+    file_index,
+    fo_id_byte,
+    disk_number
+):
     print(f"\nFile {file_index}")
     declared_size = int.from_bytes(lf_data[0:4], 'little')
     lf_id = lf_data[4:6].decode('ascii', errors='ignore')
@@ -124,10 +135,19 @@ def parse_lf(lf_data, file_index, fo_id_byte):
     for offset, chunk_id, chunk_size in contents:
         if chunk_id == 'RO':
             ro_data = lf_data[offset:offset + chunk_size]
-            parse_ro(ro_data, file_index)
+
+            parse_ro(
+                ro_data,
+                file_index,
+                disk_number
+            )
 
 
-def parse_ro(ro_data, file_index):
+def parse_ro(
+    ro_data,
+    file_index,
+    disk_number
+):
     if len(ro_data) < 6:
         print("  RO data too short to be valid.")
         return
@@ -250,7 +270,8 @@ def parse_ro(ro_data, file_index):
                 file_index,
                 width,
                 height,
-                palette_rgb
+                palette_rgb,
+                disk_number
             )
 
 
@@ -500,7 +521,8 @@ def save_room_image(
     width,
     height,
     palette_rgb,
-    file_number
+    file_number,
+    disk_number
 ):
     """
     Decode all BMCOMP_PIX32 strips and assemble the room image.
@@ -606,12 +628,20 @@ def save_room_image(
 
     image.putpalette(png_palette)
 
-    os.makedirs(
+    output_dir = os.path.join(
         'Rooms',
+        f'disk{disk_number:02}'
+    )
+
+    os.makedirs(
+        output_dir,
         exist_ok=True
     )
 
-    filename = f'Rooms/room_{file_number}.png'
+    filename = os.path.join(
+        output_dir,
+        f'room_{file_number:02}.png'
+    )
 
     image.save(
         filename,
@@ -624,7 +654,15 @@ def save_room_image(
     )
 
 
-def parse_bm(bm_data, file_number, width, height, palette_rgb):
+
+def parse_bm(
+    bm_data,
+    file_number,
+    width,
+    height,
+    palette_rgb,
+    disk_number
+):
     print("  >>> parse_bm() called")
     bm_size = int.from_bytes(bm_data[0:4], 'little')
     print(f"  Declared size: {bm_size} bytes")
@@ -683,7 +721,8 @@ def parse_bm(bm_data, file_number, width, height, palette_rgb):
             width,
             height,
             palette_rgb,
-            file_number
+            file_number,
+            disk_number
         )
 
     except ValueError as error:
@@ -852,4 +891,16 @@ def save_bitplane_images_and_combined(bm_raw, width, height, bitplanes, file_num
 
 # Entry point
 if __name__ == '__main__':
-    parse_lec_header_and_fo('resource/disk01.lec')
+
+    for disk_number in range(1, 5):
+        filepath = f'resource/disk{disk_number:02}.lec'
+
+        print()
+        print("=" * 70)
+        print(f"Processing {filepath}")
+        print("=" * 70)
+
+        parse_lec_header_and_fo(
+            filepath,
+            disk_number
+        )
