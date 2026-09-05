@@ -1,6 +1,8 @@
 import os
 from PIL import Image, ImageDraw, ImageFont
 
+ROOMS_OUTPUT_DIR = "Rooms"
+PALETTES_OUTPUT_DIR = "Palettes"
 
 CHUNK_LABELS = {
     'LE': 'LucasArts Entertainment Company File',
@@ -243,7 +245,8 @@ def parse_ro(
 
             palette_rgb = parse_pa(
                 pa_data,
-                file_index
+                file_index,
+                disk_number
             )
 
         elif chunk_id == 'BM':
@@ -291,7 +294,7 @@ def parse_hd(hd_data):
     return width, height
 
 
-def parse_pa(pa_data, room_index=None):
+def parse_pa(pa_data, room_index, disk_number):
     print("\n    >>> parse_pa() called")
 
     if len(pa_data) < 8:
@@ -332,7 +335,16 @@ def parse_pa(pa_data, room_index=None):
         print(f"      {i:02}: R={r:02X}({r}) G={g:02X}({g}) B={b:02X}({b})")
 
     # Create image
-    os.makedirs("Palettes", exist_ok=True)
+    output_dir = os.path.join(
+        PALETTES_OUTPUT_DIR,
+        f"disk{disk_number:02}"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
     swatch_size = 50
     padding = 10
     font_size = 10
@@ -358,7 +370,11 @@ def parse_pa(pa_data, room_index=None):
         draw.text((x + 2, y + swatch_size), hex_text, fill='black', font=font)
         draw.text((x + 2, y + swatch_size + font_size), dec_text, fill='black', font=font)
 
-    filename = f"Palettes/palette_{room_index if room_index is not None else 'unknown'}.png"
+    filename = os.path.join(
+        output_dir,
+        f"palette_{room_index:02}.png"
+    )
+
     img.save(filename)
     print(f"    Palette image saved as '{filename}'")
 
@@ -629,8 +645,8 @@ def save_room_image(
     image.putpalette(png_palette)
 
     output_dir = os.path.join(
-        'Rooms',
-        f'disk{disk_number:02}'
+        ROOMS_OUTPUT_DIR,
+        f"disk{disk_number:02}"
     )
 
     os.makedirs(
@@ -679,13 +695,6 @@ def parse_bm(
     print(f"  First 10 bytes (hex):   {hex_bytes}")
     print(f"  First 10 bytes (ASCII): {ascii_chars}")
 
-    # Save bm_raw for manual inspection
-    os.makedirs("bm_raw", exist_ok=True)
-    with open(f"bm_raw/bm_raw_{file_number}.bin", "wb") as f:
-        f.write(bm_raw)
-
-    # Try decoding and rendering images from 4-bitplane RLE
-    #save_bitplane_images_and_combined(bm_raw, width, height, 4, file_number, palette_rgb)
     strip_count = (width + 7) // 8
 
     smap_length = int.from_bytes(
@@ -803,90 +812,6 @@ def parse_bm(
         f"  Actual first strip offset:   "
         f"{strip_offsets[0]}"
     )
-
-
-def decode_scumm_rle(bm_raw, width, height, bitplanes):
-    row_bytes = ((width + 15) // 16) * 2
-    plane_size = row_bytes * height
-    decoded_planes = []
-
-    src_pointer = 0
-    for plane_index in range(bitplanes):
-        plane_data = bytearray()
-        bytes_written = 0
-
-        while bytes_written < plane_size:
-            byte = bm_raw[src_pointer]
-            src_pointer += 1
-
-            if byte == 0:
-                count = bm_raw[src_pointer]
-                src_pointer += 1
-                plane_data.extend([0] * count)
-                bytes_written += count
-            else:
-                plane_data.append(byte)
-                bytes_written += 1
-
-        decoded_planes.append(plane_data)
-
-    return decoded_planes
-
-
-def extract_bitplane_image(plane_data, width, height):
-    row_bytes = ((width + 15) // 16) * 2
-    img = Image.new('L', (width, height))
-    pixels = img.load()
-
-    for y in range(height):
-        for x_byte in range(row_bytes):
-            byte = plane_data[y * row_bytes + x_byte]
-            for bit in range(8):
-                bit_index = 7 - bit
-                x = x_byte * 8 + bit_index
-                if x < width:
-                    value = 255 if (byte & (1 << bit)) else 0
-                    pixels[x, y] = value
-    return img
-
-
-def combine_bitplanes(bitplanes, width, height):
-    img = Image.new('P', (width, height))
-    pixels = img.load()
-
-    row_bytes = ((width + 15) // 16) * 2
-    for y in range(height):
-        for x_byte in range(row_bytes):
-            bits = [p[y * row_bytes + x_byte] for p in bitplanes]
-            for bit in range(8):
-                bit_index = 7 - bit
-                x = x_byte * 8 + bit_index
-                if x < width:
-                    colour_index = 0
-                    for i, plane in enumerate(bitplanes):
-                        if bits[i] & (1 << bit):
-                            colour_index |= (1 << i)
-                    pixels[x, y] = colour_index
-    return img
-
-
-def set_palette_amiga(image, palette_rgb):
-    flat_palette = [val for rgb in palette_rgb[:16] for val in rgb]
-    image.putpalette(flat_palette + [0] * (768 - len(flat_palette)))
-
-
-def save_bitplane_images_and_combined(bm_raw, width, height, bitplanes, file_number, palette_rgb):
-    os.makedirs("Bitplane_Images", exist_ok=True)
-
-    planes = decode_scumm_rle(bm_raw, width, height, bitplanes)
-
-    for i, plane_data in enumerate(planes):
-        img = extract_bitplane_image(plane_data, width, height)
-        img.save(f"Bitplane_Images/bitplane_{file_number}_{i}.png")
-
-    final_img = combine_bitplanes(planes, width, height)
-    set_palette_amiga(final_img, palette_rgb)
-    final_img.save(f"Bitplane_Images/final_combined_{file_number}.png")
 
 
 # Entry point
