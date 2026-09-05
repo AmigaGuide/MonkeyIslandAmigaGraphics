@@ -1,0 +1,17 @@
+# Original game resources - copyrighted material
+resource/
+
+# Generated graphics
+output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE/editor files
+.vscode/
+.idea/
