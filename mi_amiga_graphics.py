@@ -4,6 +4,8 @@ from PIL import Image, ImageDraw, ImageFont
 ROOMS_OUTPUT_DIR = "Rooms"
 PALETTES_OUTPUT_DIR = "Palettes"
 
+__version__ = "1.0.0"
+
 CHUNK_LABELS = {
     'LE': 'LucasArts Entertainment Company File',
     'FO': 'File Offsets',
@@ -31,6 +33,17 @@ CHUNK_LABELS = {
 
 
 def parse_lec_header_and_fo(filepath, disk_number):
+    """
+    Parse an encrypted Amiga SCUMM LEC resource file.
+
+    Decrypts the file using the SCUMM XOR key 0x69, validates the
+    top-level LE chunk, reads the FO file-offset table, and passes
+    each embedded LF resource to parse_lf().
+
+    Args:
+        filepath: Path to the diskXX.lec resource file.
+        disk_number: Source disk number, used when organising output.
+    """
     with open(filepath, 'rb') as f:
         raw_data = f.read()
 
@@ -94,6 +107,19 @@ def parse_lf(
     fo_id_byte,
     disk_number
 ):
+    """
+    Parse an LF resource block from a SCUMM LEC file.
+
+    Validates the LF header and its ID against the corresponding FO
+    entry, enumerates the chunks contained within the LF block, and
+    passes any RO room chunks to parse_ro().
+
+    Args:
+        lf_data: Complete LF block, including its chunk header.
+        file_index: Sequential index of the embedded file on this disk.
+        fo_id_byte: Resource ID obtained from the FO table.
+        disk_number: Source disk number.
+    """
     print(f"\nFile {file_index}")
     declared_size = int.from_bytes(lf_data[0:4], 'little')
     lf_id = lf_data[4:6].decode('ascii', errors='ignore')
@@ -150,6 +176,19 @@ def parse_ro(
     file_index,
     disk_number
 ):
+    """
+    Parse an RO room resource and locate its graphical components.
+
+    Enumerates the room subchunks and obtains the room dimensions
+    from HD, the palette from PA, and the main background bitmap from
+    BM. Once the required information is available, the BM resource
+    is passed to parse_bm() for decoding.
+
+    Args:
+        ro_data: Complete RO block, including its chunk header.
+        file_index: Sequential index of the embedded file on this disk.
+        disk_number: Source disk number.
+    """
     if len(ro_data) < 6:
         print("  RO data too short to be valid.")
         return
@@ -279,6 +318,18 @@ def parse_ro(
 
 
 def parse_hd(hd_data):
+    """
+    Parse an HD room-header chunk.
+
+    Extracts the room dimensions and reports the number of objects
+    associated with the room.
+
+    Args:
+        hd_data: Complete HD chunk, including its chunk header.
+
+    Returns:
+        A tuple containing the room width and height in pixels.
+    """
     print("\n    >>> parse_hd() called")
     if len(hd_data) < 12:
         print("    HD chunk too short.")
@@ -295,6 +346,21 @@ def parse_hd(hd_data):
 
 
 def parse_pa(pa_data, room_index, disk_number):
+    """
+    Parse a PA palette chunk and save a visual palette reference.
+
+    Extracts the RGB colour entries from the room palette and creates
+    a palette swatch PNG in the output directory for the source disk.
+
+    Args:
+        pa_data: Complete PA chunk, including its chunk header.
+        room_index: Sequential index of the room within the source disk.
+        disk_number: Source disk number.
+
+    Returns:
+        A list of (red, green, blue) tuples representing the palette,
+        or None if the palette data is invalid.
+    """
     print("\n    >>> parse_pa() called")
 
     if len(pa_data) < 8:
@@ -383,17 +449,30 @@ def parse_pa(pa_data, room_index, disk_number):
 
 def decode_strip_ega(strip_payload, height):
     """
-    Decode one 8-pixel-wide SCUMM EGA-style strip.
+    Decode one 8-pixel-wide BMCOMP_PIX32 bitmap strip.
 
-    This is a Python adaptation of ScummVM's drawStripEGA()
-    routine, used by BMCOMP_PIX32 (0x0A) for the Amiga
-    version of The Secret of Monkey Island.
+    Implements the decoding behaviour of ScummVM's drawStripEGA()
+    routine used by the Amiga version of The Secret of Monkey Island.
+    The compressed stream supports solid-colour runs, copies from the
+    previous column, alternating two-colour runs, and extended run
+    lengths.
+
+    Pixels are decoded vertically, one column at a time, across the
+    eight columns that make up a SCUMM bitmap strip.
+
+    Args:
+        strip_payload: Compressed strip data after the compression byte.
+        height: Height of the room bitmap in pixels.
 
     Returns:
-        columns: 8 columns of palette-index nibbles (0-15)
-        src:     number of payload bytes consumed
-    """
+        A tuple containing:
+            - Eight columns of decoded 4-bit colour indices (0-15).
+            - The number of compressed payload bytes consumed.
 
+    Raises:
+        ValueError: If the compressed data is malformed or ends before
+            all eight columns have been decoded.
+    """
     columns = [
         [0 for _ in range(height)]
         for _ in range(8)
@@ -541,16 +620,31 @@ def save_room_image(
     disk_number
 ):
     """
-    Decode all BMCOMP_PIX32 strips and assemble the room image.
+    Decode and save a complete Amiga SCUMM room background.
 
-    The Amiga version of The Secret of Monkey Island decodes to
-    4-bit colour values (0-15), which map to room palette entries
-    16-31.
+    Decodes each 8-pixel-wide BMCOMP_PIX32 strip, assembles the strips
+    horizontally into the complete room bitmap, and saves the result
+    as a 16-colour indexed PNG.
 
-    The resulting PNG is saved as an indexed-colour image using
-    exactly those 16 room colours.
+    The decoder produces 4-bit colour values 0-15. For the Amiga
+    version of The Secret of Monkey Island these correspond to source
+    room palette entries 16-31, which are remapped to PNG palette
+    entries 0-15.
+
+    Args:
+        bm_raw: BM payload containing the strip table and compressed data.
+        strip_offsets: Offsets of the compressed bitmap strips.
+        smap_length: Length of the bitmap/SMAP data within the BM payload.
+        width: Width of the complete room bitmap in pixels.
+        height: Height of the complete room bitmap in pixels.
+        palette_rgb: Room palette as a list of RGB tuples.
+        file_number: Sequential index used in the output filename.
+        disk_number: Source disk number used for the output directory.
+
+    Raises:
+        ValueError: If the palette, strip table, compression method, or
+            decoded strip data is inconsistent with the expected format.
     """
-
     if len(palette_rgb) < 32:
         raise ValueError(
             f"Room palette contains only {len(palette_rgb)} colours; "
@@ -679,6 +773,26 @@ def parse_bm(
     palette_rgb,
     disk_number
 ):
+    """
+    Parse and decode the main BM room-background resource.
+
+    Reads the bitmap payload and its SMAP-style strip-offset table.
+    Each room is divided into 8-pixel-wide compressed strips whose
+    first byte identifies the compression method. The strip table and
+    room information are passed to save_room_image() for reconstruction.
+
+    Additional diagnostic output is produced to document the strip
+    structure, compression bytes, and first-strip decoding behaviour
+    used while reverse-engineering the Amiga bitmap format.
+
+    Args:
+        bm_data: Complete BM chunk, including its chunk header.
+        file_number: Sequential index of the embedded file on this disk.
+        width: Room width obtained from the HD chunk.
+        height: Room height obtained from the HD chunk.
+        palette_rgb: Room palette obtained from the PA chunk.
+        disk_number: Source disk number.
+    """
     print("  >>> parse_bm() called")
     bm_size = int.from_bytes(bm_data[0:4], 'little')
     print(f"  Declared size: {bm_size} bytes")
@@ -816,6 +930,8 @@ def parse_bm(
 
 # Entry point
 if __name__ == '__main__':
+
+    print(f"MonkeyIslandAmigaGraphics v{__version__}")
 
     for disk_number in range(1, 5):
         filepath = f'resource/disk{disk_number:02}.lec'
