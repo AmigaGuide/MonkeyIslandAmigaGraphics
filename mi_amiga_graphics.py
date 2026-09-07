@@ -316,6 +316,25 @@ def parse_ro(
                 disk_number
             )
 
+        elif chunk_id == 'OI':
+            oi_data = ro_data[
+                offset:offset + chunk_size
+            ]
+
+            if palette_rgb is None:
+                print(
+                    "  Cannot decode OI: room palette "
+                    "is unavailable."
+                )
+                continue
+
+            parse_oi(
+                oi_data,
+                file_index,
+                palette_rgb,
+                disk_number
+            )
+
 
 def parse_hd(hd_data):
     """
@@ -763,6 +782,366 @@ def save_room_image(
         f"({width}x{height}, 16 colours)"
     )
 
+
+def save_object_image(
+    bitmap_data,
+    strip_offsets,
+    smap_length,
+    width,
+    height,
+    palette_rgb,
+    file_number,
+    object_id,
+    disk_number
+):
+    """
+    Decode and save one Amiga SCUMM object image.
+
+    The object consists of 8-pixel-wide BMCOMP_PIX32 strips using
+    the same 4-bit colour decoding as room backgrounds.
+
+    Args:
+        bitmap_data: OI bitmap payload containing the strip table.
+        strip_offsets: Offsets of compressed image strips.
+        smap_length: Length of the object's bitmap data.
+        width: Derived object width in pixels.
+        height: Derived object height in pixels.
+        palette_rgb: Palette obtained from the containing room.
+        file_number: Sequential LF index containing the object.
+        object_id: SCUMM object identifier stored in the OI.
+        disk_number: Source disk number.
+    """
+
+    pixels = [
+        [0 for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    strip_count = len(strip_offsets)
+
+    for strip_index, strip_start in enumerate(
+        strip_offsets
+    ):
+
+        if strip_index + 1 < strip_count:
+            strip_end = strip_offsets[
+                strip_index + 1
+            ]
+        else:
+            strip_end = smap_length
+
+        compression_code = bitmap_data[
+            strip_start
+        ]
+
+        if compression_code != 0x0A:
+            raise ValueError(
+                f"Object {object_id}, strip "
+                f"{strip_index}: unsupported "
+                f"compression code "
+                f"0x{compression_code:02X}."
+            )
+
+        strip_payload = bitmap_data[
+            strip_start + 1:strip_end
+        ]
+
+        columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        if bytes_used != len(strip_payload):
+            raise ValueError(
+                f"Object {object_id}, strip "
+                f"{strip_index}: decoder used "
+                f"{bytes_used} of "
+                f"{len(strip_payload)} bytes."
+            )
+
+        base_x = strip_index * 8
+
+        for column_index in range(8):
+
+            x = base_x + column_index
+
+            for y in range(height):
+                pixels[y][x] = (
+                    columns[column_index][y]
+                )
+
+    image = Image.new(
+        "P",
+        (width, height)
+    )
+
+    image.putdata(
+        [
+            pixel
+            for row in pixels
+            for pixel in row
+        ]
+    )
+
+    # As with BM room backgrounds, decoded values 0-15
+    # map to source room palette entries 16-31.
+    png_palette = []
+
+    for r, g, b in palette_rgb[16:32]:
+        png_palette.extend(
+            [r, g, b]
+        )
+
+    png_palette.extend(
+        [0, 0, 0] * (256 - 16)
+    )
+
+    image.putpalette(
+        png_palette
+    )
+
+    output_dir = os.path.join(
+        "Objects",
+        f"disk{disk_number:02}",
+        f"room_{file_number:02}"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    filename = os.path.join(
+        output_dir,
+        f"object_{object_id:03}.png"
+    )
+
+    image.save(
+        filename,
+        optimize=True
+    )
+
+    print(
+        f"  Indexed object image saved as "
+        f"'{filename}' "
+        f"({width}x{height}, 16 colours)"
+    )
+
+
+def parse_oi(
+    oi_data,
+    file_number,
+    palette_rgb,
+    disk_number
+):
+    """
+    Parse and decode an OI (Object Image) resource.
+
+    Amiga object images use the same 8-pixel-wide BMCOMP_PIX32
+    strip compression as the main room BM graphics.
+
+    The object width is derived from the strip-offset table.
+    The height is inferred by finding the value for which every
+    compressed strip decodes completely and consumes exactly its
+    available payload.
+
+    Args:
+        oi_data: Complete OI chunk, including its chunk header.
+        file_number: Sequential index of the containing LF resource.
+        palette_rgb: Palette obtained from the room's PA chunk.
+        disk_number: Source disk number.
+    """
+
+    if len(oi_data) < 12:
+        print("  OI chunk too short to contain image data.")
+        return
+
+    print("\n  >>> parse_oi() called")
+
+    oi_size = int.from_bytes(
+        oi_data[0:4],
+        "little"
+    )
+
+    oi_id = oi_data[4:6].decode(
+        "ascii",
+        errors="replace"
+    )
+
+    object_id = int.from_bytes(
+        oi_data[6:8],
+        "little"
+    )
+
+    print(f"  Declared OI size: {oi_size} bytes")
+    print(f"  Header found: '{oi_id}'")
+    print(f"  Object ID: {object_id}")
+
+    if oi_id != "OI":
+        print("  Invalid OI header.")
+        return
+
+    # Bitmap data begins after the OI header and object ID.
+    bitmap_data = oi_data[8:]
+
+    if len(bitmap_data) < 8:
+        print("  OI contains no usable bitmap data.")
+        return
+
+    smap_length = int.from_bytes(
+        bitmap_data[0:4],
+        "little"
+    )
+
+    first_strip_offset = int.from_bytes(
+        bitmap_data[4:8],
+        "little"
+    )
+
+    # Strip table:
+    #
+    #   4-byte SMAP length
+    #   N × 4-byte strip offsets
+    #
+    # Therefore:
+    #
+    #   first_strip_offset = 4 + (N * 4)
+    #
+    if first_strip_offset < 8:
+        print(
+            f"  Invalid first strip offset: "
+            f"{first_strip_offset}"
+        )
+        return
+
+    if (first_strip_offset - 4) % 4 != 0:
+        print(
+            "  First strip offset does not describe "
+            "a valid strip table."
+        )
+        return
+
+    strip_count = (
+        first_strip_offset - 4
+    ) // 4
+
+    width = strip_count * 8
+
+    print(f"  SMAP length: {smap_length} bytes")
+    print(f"  Strip count: {strip_count}")
+    print(f"  Derived width: {width} pixels")
+
+    strip_offsets = []
+
+    for strip_index in range(strip_count):
+        offset_pos = 4 + strip_index * 4
+
+        strip_offset = int.from_bytes(
+            bitmap_data[
+                offset_pos:offset_pos + 4
+            ],
+            "little"
+        )
+
+        strip_offsets.append(strip_offset)
+
+    # Confirm that the object uses the compression format
+    # supported by our existing Amiga decoder.
+    for strip_index, strip_offset in enumerate(
+        strip_offsets
+    ):
+        if strip_offset >= len(bitmap_data):
+            print(
+                f"  Strip {strip_index} offset "
+                f"{strip_offset} is outside OI data."
+            )
+            return
+
+        compression_code = bitmap_data[
+            strip_offset
+        ]
+
+        if compression_code != 0x0A:
+            print(
+                f"  Strip {strip_index}: unsupported "
+                f"compression code "
+                f"0x{compression_code:02X}."
+            )
+            return
+
+    # Infer image height.
+    #
+    # A valid height must allow EVERY strip to:
+    #
+    #   1. decode exactly eight columns, and
+    #   2. consume its entire compressed payload.
+    #
+    valid_heights = []
+
+    for candidate_height in range(1, 257):
+
+        valid = True
+
+        for strip_index, strip_start in enumerate(
+            strip_offsets
+        ):
+
+            if strip_index + 1 < strip_count:
+                strip_end = strip_offsets[
+                    strip_index + 1
+                ]
+            else:
+                strip_end = smap_length
+
+            strip_payload = bitmap_data[
+                strip_start + 1:strip_end
+            ]
+
+            try:
+                _, bytes_used = decode_strip_ega(
+                    strip_payload,
+                    candidate_height
+                )
+
+            except ValueError:
+                valid = False
+                break
+
+            if bytes_used != len(strip_payload):
+                valid = False
+                break
+
+        if valid:
+            valid_heights.append(
+                candidate_height
+            )
+
+    if len(valid_heights) != 1:
+        print(
+            "  Unable to determine a unique object "
+            f"height. Candidates: {valid_heights}"
+        )
+        return
+
+    height = valid_heights[0]
+
+    print(f"  Derived height: {height} pixels")
+    print(
+        f"  Object image dimensions: "
+        f"{width} x {height}"
+    )
+
+    save_object_image(
+        bitmap_data,
+        strip_offsets,
+        smap_length,
+        width,
+        height,
+        palette_rgb,
+        file_number,
+        object_id,
+        disk_number
+    )
 
 
 def parse_bm(
