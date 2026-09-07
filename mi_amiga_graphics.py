@@ -774,7 +774,8 @@ def save_room_image(
 
     image.save(
         filename,
-        optimize=True
+        optimize=True,
+        bits=4
     )
 
     print(
@@ -918,7 +919,8 @@ def save_object_image(
 
     image.save(
         filename,
-        optimize=True
+        optimize=True,
+        bits=4
     )
 
     print(
