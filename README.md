@@ -6,24 +6,31 @@ The project was created primarily to extract the original room background artwor
 
 ## Project Status
 
-### Version 1.0.0
+### Version 1.1.0
 
-Version 1.0.0 successfully extracts the main `BM` room backgrounds from all four disks of the Amiga version of *The Secret of Monkey Island*.
+Version 1.1.0 successfully extracts both the main `BM` room backgrounds and `OI` object images from all four disks of the Amiga version of *The Secret of Monkey Island*.
 
 The program:
 
 * Parses the SCUMM resource structure contained within the Amiga `.lec` files.
-* Locates room (`RO`) resources and their associated headers, palettes and `BM` bitmap data.
-* Reads the bitmap strip-offset table.
+* Locates room (`RO`) resources and their associated headers, palettes, `BM` bitmap data and `OI` object images.
+* Reads the bitmap strip-offset tables used by room and object graphics.
 * Decodes the `BMCOMP_PIX32` compression used by the Amiga version of the game.
-* Reconstructs the individual 8-pixel-wide strips into complete room backgrounds.
+* Reconstructs individual 8-pixel-wide strips into complete graphical resources.
 * Applies the appropriate 16-colour Amiga room palette.
-* Saves the extracted backgrounds as 16-colour indexed PNG images.
+* Saves extracted graphics as 16-colour indexed PNG images.
 * Creates palette reference images for each room.
 
-The current implementation has successfully extracted **85 room background images** across the four game disks.
+The current implementation has successfully extracted:
 
-Development will continue with the aim of extracting additional graphical resources while retaining the room backgrounds as separate, unpopulated images.
+* **85 room background images**
+* **659 object images**
+
+across the four game disks, with no obvious graphical corruption observed during testing.
+
+Room backgrounds are deliberately exported without object images composited over them, preserving the clean background artwork as stored in the game resources.
+
+Development will continue with the aim of identifying and extracting additional graphical resources from the game.
 
 ## Requirements
 
@@ -63,7 +70,7 @@ MonkeyIslandAmigaGraphics/
 
 The `resource/` directory is excluded from Git and no original game data is distributed with this project.
 
-Development and testing of version 1.0.0 has been performed using resource files from the **original, unmodified Amiga release** of *The Secret of Monkey Island*.
+Development and testing has been performed using resource files from the **original, unmodified Amiga release** of *The Secret of Monkey Island*.
 
 Modified or cracked/hacked versions of the game have not currently been tested and may contain differences that affect parsing or extraction. Use of the original, unmodified game data is therefore recommended.
 
@@ -97,25 +104,51 @@ Palettes/
 └── disk04/
 ```
 
-Generated output directories are excluded from Git.
+Object images are written to:
+
+```text
+Objects/
+├── disk01/
+│   ├── room_01/
+│   ├── room_02/
+│   └── ...
+├── disk02/
+├── disk03/
+└── disk04/
+```
+
+Each object image retains the object identifier stored in its OI resource, for example:
+
+```text
+Objects/disk01/room_01/object_113.png
+```
+
+The generated `Rooms/`, `Palettes/` and `Objects/` directories are excluded from Git.
+
 
 ## Graphics Format
 
-The Amiga room backgrounds are stored as compressed 8-pixel-wide bitmap strips.
+The Amiga room backgrounds and object images are stored as compressed 8-pixel-wide bitmap strips.
 
 For the resources currently supported by this project, each strip uses compression method `0x0A`, corresponding to the `BMCOMP_PIX32` decoding path used by ScummVM for the Amiga version of *The Secret of Monkey Island*.
 
+The same strip decoder is used successfully for both main `BM` room backgrounds and `OI` object images.
+
+For room backgrounds, the image dimensions are obtained from the room metadata. Object image widths are derived from their strip-offset tables, while their heights are determined by finding the height for which every compressed strip decodes completely and consumes its full payload.
+
 The decoder produces 4-bit colour values representing 16 colours. These correspond to entries 16–31 of the room's 32-entry palette.
 
-The extracted backgrounds are therefore saved as **16-colour indexed PNG files**, preserving the indexed-colour nature of the original artwork rather than converting the images to 24-bit RGB.
+Extracted graphics are therefore saved as **16-colour indexed PNG files**, preserving the indexed-colour nature of the original Amiga artwork rather than converting the images to 24-bit RGB.
+
 
 ## Goals
 
-Version 1.0.0 fulfils the project's original objective of extracting the clean room background artwork.
+Version 1.0.0 fulfilled the project's original objective of extracting the clean room background artwork.
 
-Future development may extend the extractor to other graphical resources contained within the game, including object images and other artwork.
+Version 1.1.0 extends the extractor to `OI` object images while continuing to preserve room backgrounds as separate, unpopulated images.
 
-These resources will be extracted separately rather than composited onto the room backgrounds.
+Future development will investigate other graphical resources contained within the game with the longer-term aim of extracting as much of the original Amiga artwork as practical.
+
 
 ## ScummVM
 

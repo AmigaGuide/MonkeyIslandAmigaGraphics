@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw, ImageFont
 ROOMS_OUTPUT_DIR = "Rooms"
 PALETTES_OUTPUT_DIR = "Palettes"
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 CHUNK_LABELS = {
     'LE': 'LucasArts Entertainment Company File',
