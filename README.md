@@ -6,31 +6,37 @@ The project was created primarily to extract the original room background artwor
 
 ## Project Status
 
-### Version 1.1.0
+### Version 1.2.0
 
-Version 1.1.0 successfully extracts both the main `BM` room backgrounds and `OI` object images from all four disks of the Amiga version of *The Secret of Monkey Island*.
+Version 1.2.0 successfully extracts room backgrounds, object images and costume animation cels from all four disks of the Amiga version of *The Secret of Monkey Island*.
 
 The program:
 
 * Parses the SCUMM resource structure contained within the Amiga `.lec` files.
-* Locates room (`RO`) resources and their associated headers, palettes, `BM` bitmap data and `OI` object images.
-* Reads the bitmap strip-offset tables used by room and object graphics.
-* Decodes the `BMCOMP_PIX32` compression used by the Amiga version of the game.
-* Reconstructs individual 8-pixel-wide strips into complete graphical resources.
-* Applies the appropriate 16-colour Amiga room palette.
-* Saves extracted graphics as 16-colour indexed PNG images.
+* Locates room (`RO`) resources and their associated palettes and `BM` bitmap data.
+* Extracts `OI` object images associated with each room.
+* Parses `CO` costume resources and extracts their individual graphical cels.
+* Decodes the `BMCOMP_PIX32` compression used by Amiga room backgrounds and object images.
+* Decodes the Amiga BYLE RLE compression used by costume graphics.
+* Reconstructs the original indexed graphical resources.
+* Saves room backgrounds and object images as 16-colour indexed PNG files.
+* Saves costume cels as 16-colour indexed PNG files with transparency.
 * Creates palette reference images for each room.
 
 The current implementation has successfully extracted:
 
 * **85 room background images**
 * **659 object images**
+* **3,123 costume animation cels from 118 costume resources**
 
-across the four game disks, with no obvious graphical corruption observed during testing.
+across the four game disks.
 
-Room backgrounds are deliberately exported without object images composited over them, preserving the clean background artwork as stored in the game resources.
+A complete validation run identified 3,126 candidate costume cels. Of these, 3,123 were successfully decoded and saved. Three candidates were rejected because their interpreted dimensions were implausible. No costume decoding failures, save failures or unsupported costume formats were encountered.
 
-Development will continue with the aim of identifying and extracting additional graphical resources from the game.
+Room backgrounds are deliberately exported without object or costume graphics composited over them, preserving the clean background artwork as stored in the game resources.
+
+Development will continue with the aim of identifying and extracting additional graphical resources where practical.
+
 
 ## Requirements
 
@@ -117,6 +123,29 @@ Objects/
 └── disk04/
 ```
 
+Costume animation cels are written to:
+
+```text
+Costumes/
+├── disk01/
+│   ├── room_01/
+│   │   ├── costume_01/
+│   │   │   ├── cel_001.png
+│   │   │   ├── cel_002.png
+│   │   │   └── ...
+│   │   └── ...
+│   └── ...
+├── disk02/
+├── disk03/
+└── disk04/
+```
+
+Costume resources can contain multiple graphical cels representing animation frames or other graphical states. Each unique cel discovered by the extractor is saved separately.
+
+Costume palette index 0 is exported as transparent, allowing the extracted artwork to be viewed independently of the room background.
+
+The generated `Rooms/`, `Palettes/`, `Objects/` and `Costumes/` directories are excluded from Git.
+
 Each object image retains the object identifier stored in its OI resource, for example:
 
 ```text
@@ -126,7 +155,9 @@ Objects/disk01/room_01/object_113.png
 The generated `Rooms/`, `Palettes/` and `Objects/` directories are excluded from Git.
 
 
-## Graphics Format
+## Graphics Formats
+
+### Room Backgrounds and Object Images
 
 The Amiga room backgrounds and object images are stored as compressed 8-pixel-wide bitmap strips.
 
@@ -138,16 +169,30 @@ For room backgrounds, the image dimensions are obtained from the room metadata. 
 
 The decoder produces 4-bit colour values representing 16 colours. These correspond to entries 16–31 of the room's 32-entry palette.
 
-Extracted graphics are therefore saved as **16-colour indexed PNG files**, preserving the indexed-colour nature of the original Amiga artwork rather than converting the images to 24-bit RGB.
+Room backgrounds and object images are saved as **4-bit, 16-colour indexed PNG files**, preserving the indexed-colour nature of the original Amiga artwork.
+
+### Costume Graphics
+
+Classic `CO` costume resources contain animation metadata and graphical cels used for characters and other animated elements.
+
+The Amiga costume graphics supported by this project use the 16-colour `0x58` costume format and Amiga BYLE RLE compression.
+
+Costume pixel data is reconstructed vertically, column by column. Each RLE value contains a colour index and run length, with extended run lengths stored in an additional byte when required.
+
+Each costume contains its own 16-entry colour mapping into the associated room palette.
+
+Extracted costume cels are saved as **4-bit, 16-colour indexed PNG files**, with costume colour index 0 represented as transparency.
 
 
 ## Goals
 
 Version 1.0.0 fulfilled the project's original objective of extracting the clean room background artwork.
 
-Version 1.1.0 extends the extractor to `OI` object images while continuing to preserve room backgrounds as separate, unpopulated images.
+Version 1.1.0 extended the extractor to `OI` object images while continuing to preserve room backgrounds as separate, unpopulated images.
 
-Future development will investigate other graphical resources contained within the game with the longer-term aim of extracting as much of the original Amiga artwork as practical.
+Version 1.2.0 adds extraction of `CO` costume resources, including individual animation cels for characters and other animated graphical elements.
+
+The longer-term aim is to extract as much of the original Amiga graphical artwork as practical while retaining the individual resources rather than compositing them into reconstructed screenshots.
 
 
 ## ScummVM

@@ -1,10 +1,11 @@
 import os
 from PIL import Image, ImageDraw, ImageFont
 
-ROOMS_OUTPUT_DIR = "Rooms"
+ROOMS_OUTPUT_DIR    = "Rooms"
 PALETTES_OUTPUT_DIR = "Palettes"
+COSTUMES_OUTPUT_DIR = "Costumes"
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 CHUNK_LABELS = {
     'LE': 'LucasArts Entertainment Company File',
@@ -32,7 +33,11 @@ CHUNK_LABELS = {
 }
 
 
-def parse_lec_header_and_fo(filepath, disk_number):
+def parse_lec_header_and_fo(
+    filepath,
+    disk_number,
+    costume_stats
+):
     """
     Parse an encrypted Amiga SCUMM LEC resource file.
 
@@ -97,7 +102,8 @@ def parse_lec_header_and_fo(filepath, disk_number):
             lf_data,
             i + 1,
             fo_id_byte,
-            disk_number
+            disk_number,
+            costume_stats
         )
 
 
@@ -105,7 +111,8 @@ def parse_lf(
     lf_data,
     file_index,
     fo_id_byte,
-    disk_number
+    disk_number,
+    costume_stats
 ):
     """
     Parse an LF resource block from a SCUMM LEC file.
@@ -159,15 +166,48 @@ def parse_lf(
             print("  Warning: last chunk extends beyond LF block.")
             break
 
-    # Look for RO chunks and process each
+    room_palette = None
+
+    # Process the room first so that its palette is available
+    # to associated costume resources.
     for offset, chunk_id, chunk_size in contents:
         if chunk_id == 'RO':
-            ro_data = lf_data[offset:offset + chunk_size]
+            ro_data = lf_data[
+                offset:offset + chunk_size
+            ]
 
-            parse_ro(
+            room_palette = parse_ro(
                 ro_data,
                 file_index,
                 disk_number
+            )
+
+    # Costumes are LF-level resources associated with this room.
+    costume_number = 0
+
+    for offset, chunk_id, chunk_size in contents:
+        if chunk_id == 'CO':
+
+            costume_number += 1
+
+            if room_palette is None:
+                print(
+                    "  Cannot decode CO: room palette "
+                    "is unavailable."
+                )
+                continue
+
+            co_data = lf_data[
+                offset:offset + chunk_size
+            ]
+
+            parse_co(
+                co_data,
+                room_palette,
+                disk_number,
+                file_index,
+                costume_number,
+                costume_stats
             )
 
 
@@ -335,6 +375,8 @@ def parse_ro(
                 disk_number
             )
 
+    return palette_rgb
+
 
 def parse_hd(hd_data):
     """
@@ -464,6 +506,584 @@ def parse_pa(pa_data, room_index, disk_number):
     print(f"    Palette image saved as '{filename}'")
 
     return colours
+
+
+def parse_co(
+    co_data,
+    room_palette,
+    disk_number,
+    room_number,
+    costume_number,
+    costume_stats
+):
+    """
+    Parse and extract graphical cels from a classic SCUMM CO costume.
+
+    This implementation targets the 16-colour 0x58 costume format
+    used by the Amiga version of The Secret of Monkey Island.
+
+    The costume contains animation tables that ultimately reference
+    graphical cels. Each unique referenced cel is decoded once and
+    written as a separate indexed PNG.
+
+    Args:
+        co_data: Complete CO chunk, including its small-header wrapper.
+        room_palette: Palette belonging to the associated room.
+        disk_number: Source disk number.
+        room_number: Sequential room index within the disk.
+        costume_number: Sequential CO index within the LF resource.
+    """
+
+    if len(co_data) < 24:
+        print("  CO chunk too short.")
+        return
+
+    declared_size = int.from_bytes(
+        co_data[0:4],
+        "little"
+    )
+
+    header = co_data[4:6].decode(
+        "ascii",
+        errors="replace"
+    )
+
+    if header != "CO":
+        print(
+            f"  Invalid CO header: '{header}'"
+        )
+        return
+
+    costume_stats["costumes_processed"] += 1
+
+    num_anim = co_data[6]
+    format_byte = co_data[7]
+
+    costume_format = format_byte & 0x7F
+    mirrored = bool(format_byte & 0x80)
+
+    print()
+    print("  >>> parse_co() called")
+    print(f"  Declared CO size: {declared_size} bytes")
+    print(f"  Costume format: 0x{costume_format:02X}")
+    print(f"  Maximum animation index: {num_anim}")
+    print(f"  Mirrored: {mirrored}")
+
+    if costume_format != 0x58:
+        print(
+            "  Unsupported costume format; "
+            "expected 0x58."
+        )
+
+        costume_stats["unsupported_formats"] += 1
+
+        costume_stats["problems"].append({
+            "disk": disk_number,
+            "room": room_number,
+            "costume": costume_number,
+            "cel": None,
+            "message": (
+                f"unsupported costume format "
+                f"0x{costume_format:02X}"
+            )
+        })
+
+        return
+
+    costume_palette = list(
+        co_data[8:24]
+    )
+
+    table_base = 24
+
+    # Offset to the animation command stream.
+    anim_cmds_offset = int.from_bytes(
+        co_data[
+            table_base:table_base + 2
+        ],
+        "little"
+    )
+
+    # Sixteen limb-specific frame-table offsets follow.
+    frame_offsets_base = table_base + 2
+
+    # Animation data-offset table follows the 16 frame offsets.
+    data_offsets_base = table_base + 34
+
+    if anim_cmds_offset >= len(co_data):
+        print(
+            "  Animation command table lies outside CO."
+        )
+        return
+
+    print(
+        f"  Animation command table offset: "
+        f"{anim_cmds_offset}"
+    )
+
+    referenced_commands = set()
+
+    # Discover which animation command indices are referenced
+    # by the costume's limb data.
+    for animation_index in range(num_anim + 1):
+
+        entry = (
+            data_offsets_base
+            + animation_index * 2
+        )
+
+        if entry + 2 > len(co_data):
+            break
+
+        animation_offset = int.from_bytes(
+            co_data[
+                entry:entry + 2
+            ],
+            "little"
+        )
+
+        if animation_offset == 0:
+            continue
+
+        if animation_offset + 2 > len(co_data):
+            continue
+
+        pointer = animation_offset
+
+        limb_mask = int.from_bytes(
+            co_data[
+                pointer:pointer + 2
+            ],
+            "little"
+        )
+
+        pointer += 2
+
+        limb = 0
+        mask = limb_mask
+
+        while mask & 0xFFFF:
+
+            if mask & 0x8000:
+
+                if pointer + 2 > len(co_data):
+                    break
+
+                command_start = int.from_bytes(
+                    co_data[
+                        pointer:pointer + 2
+                    ],
+                    "little"
+                )
+
+                pointer += 2
+
+                if command_start != 0xFFFF:
+
+                    if pointer >= len(co_data):
+                        break
+
+                    extra = co_data[pointer]
+                    pointer += 1
+
+                    command_end = (
+                        command_start
+                        + (extra & 0x7F)
+                    )
+
+                    for command_index in range(
+                        command_start,
+                        command_end + 1
+                    ):
+                        referenced_commands.add(
+                            (limb, command_index)
+                        )
+
+            limb += 1
+            mask = (mask << 1) & 0xFFFF
+
+    # Convert referenced animation commands into candidate cel offsets.
+    cel_offsets = set()
+
+    for limb, command_index in sorted(
+        referenced_commands
+    ):
+
+        command_pos = (
+            anim_cmds_offset
+            + command_index
+        )
+
+        if command_pos >= len(co_data):
+            continue
+
+        command = co_data[command_pos] & 0x7F
+
+        # 0x79 and above are control/animation commands,
+        # not drawable cel indices.
+        if command >= 0x79:
+            continue
+
+        frame_offset_entry = (
+            frame_offsets_base
+            + limb * 2
+        )
+
+        if frame_offset_entry + 2 > len(co_data):
+            continue
+
+        frame_table_offset = int.from_bytes(
+            co_data[
+                frame_offset_entry:
+                frame_offset_entry + 2
+            ],
+            "little"
+        )
+
+        if frame_table_offset == 0:
+            continue
+
+        cel_pointer_entry = (
+            frame_table_offset
+            + command * 2
+        )
+
+        if cel_pointer_entry + 2 > len(co_data):
+            continue
+
+        cel_offset = int.from_bytes(
+            co_data[
+                cel_pointer_entry:
+                cel_pointer_entry + 2
+            ],
+            "little"
+        )
+
+        # A valid cel must have room for its 12-byte header.
+        if cel_offset < 24:
+            continue
+
+        if cel_offset + 12 > len(co_data):
+            continue
+
+        cel_offsets.add(
+            cel_offset
+        )
+
+    cel_offsets = sorted(cel_offsets)
+
+    costume_stats["cel_candidates"] += len(
+        cel_offsets
+    )
+
+    print(
+        f"  Unique graphical cels found: "
+        f"{len(cel_offsets)}"
+    )
+
+    for cel_index, cel_offset in enumerate(
+        cel_offsets,
+        start=1
+    ):
+
+        width = int.from_bytes(
+            co_data[
+                cel_offset:cel_offset + 2
+            ],
+            "little"
+        )
+
+        height = int.from_bytes(
+            co_data[
+                cel_offset + 2:cel_offset + 4
+            ],
+            "little"
+        )
+
+        rel_x = read_signed_le16(
+            co_data,
+            cel_offset + 4
+        )
+
+        rel_y = read_signed_le16(
+            co_data,
+            cel_offset + 6
+        )
+
+        move_x = read_signed_le16(
+            co_data,
+            cel_offset + 8
+        )
+
+        move_y = read_signed_le16(
+            co_data,
+            cel_offset + 10
+        )
+
+        print(
+            f"    Cel {cel_index:03}: "
+            f"{width}x{height}, "
+            f"rel=({rel_x},{rel_y}), "
+            f"move=({move_x},{move_y})"
+        )
+
+        # ----------------------------------------------------------
+        # Sanity checks
+        # ----------------------------------------------------------
+
+        if width == 0 or height == 0:
+            print(
+                f"    Skipping invalid cel dimensions: "
+                f"{width}x{height}"
+            )
+
+            costume_stats["zero_size"] += 1
+
+            costume_stats["problems"].append({
+                "disk": disk_number,
+                "room": room_number,
+                "costume": costume_number,
+                "cel": cel_index,
+                "message": (
+                    f"invalid cel dimensions "
+                    f"{width}x{height}"
+                )
+            })
+
+            continue
+
+        if (
+            width > 1024
+            or height > 1024
+            or width * height > 500000
+        ):
+            print(
+                f"    Skipping implausible cel dimensions: "
+                f"{width}x{height}"
+            )
+
+            costume_stats["implausible_size"] += 1
+
+            costume_stats["problems"].append({
+                "disk": disk_number,
+                "room": room_number,
+                "costume": costume_number,
+                "cel": cel_index,
+                "message": (
+                    f"implausible cel dimensions "
+                    f"{width}x{height}"
+                )
+            })
+
+            continue
+
+        payload_start = (
+            cel_offset + 12
+        )
+
+        # Do not stop at the next candidate cel offset.
+        # Let the decoder consume exactly as much compressed data
+        # as is required to produce width * height pixels.
+        cel_payload = co_data[
+            payload_start:
+        ]
+
+        try:
+            pixels, bytes_used = (
+                decode_costume_cel_ami(
+                    cel_payload,
+                    width,
+                    height
+                )
+            )
+
+        except ValueError as error:
+            print(
+                f"    Cel decode failed: {error}"
+            )
+
+            costume_stats["decode_failures"] += 1
+
+            costume_stats["problems"].append({
+                "disk": disk_number,
+                "room": room_number,
+                "costume": costume_number,
+                "cel": cel_index,
+                "message": (
+                    f"decode failed: {error}"
+                )
+            })
+
+            continue
+
+        print(
+            f"    Compressed bytes used: "
+            f"{bytes_used}"
+        )
+
+        try:
+            save_costume_cel(
+                pixels,
+                width,
+                height,
+                costume_palette,
+                room_palette,
+                disk_number,
+                room_number,
+                costume_number,
+                cel_index
+            )
+
+            costume_stats["cels_saved"] += 1
+
+        except ValueError as error:
+            print(
+                f"    Costume cel save failed: "
+                f"{error}"
+            )
+
+            costume_stats["save_failures"] += 1
+
+            costume_stats["problems"].append({
+                "disk": disk_number,
+                "room": room_number,
+                "costume": costume_number,
+                "cel": cel_index,
+                "message": (
+                    f"save failed: {error}"
+                )
+            })
+
+
+def create_costume_stats():
+    """
+    Create counters used to summarise costume extraction.
+
+    Returns:
+        A dictionary containing costume extraction counters and
+        recorded problem details.
+    """
+
+    return {
+        "costumes_processed": 0,
+        "cel_candidates": 0,
+        "cels_saved": 0,
+        "zero_size": 0,
+        "implausible_size": 0,
+        "decode_failures": 0,
+        "save_failures": 0,
+        "unsupported_formats": 0,
+        "problems": []
+    }
+
+
+def print_costume_summary(costume_stats):
+    """
+    Print a summary of costume extraction results.
+
+    Args:
+        costume_stats: Statistics dictionary populated while
+            processing CO costume resources.
+    """
+
+    problems = costume_stats["problems"]
+
+    problem_costumes = {
+        (
+            problem["disk"],
+            problem["room"],
+            problem["costume"]
+        )
+        for problem in problems
+    }
+
+    print()
+    print("=" * 70)
+    print("COSTUME EXTRACTION SUMMARY")
+    print("=" * 70)
+
+    print(
+        f"CO resources processed:          "
+        f"{costume_stats['costumes_processed']}"
+    )
+
+    print(
+        f"Unique cel candidates found:     "
+        f"{costume_stats['cel_candidates']}"
+    )
+
+    print(
+        f"Costume cels saved:              "
+        f"{costume_stats['cels_saved']}"
+    )
+
+    print()
+    print(
+        f"Skipped zero-size cels:          "
+        f"{costume_stats['zero_size']}"
+    )
+
+    print(
+        f"Skipped implausible dimensions: "
+        f"{costume_stats['implausible_size']}"
+    )
+
+    print(
+        f"Cel decode failures:             "
+        f"{costume_stats['decode_failures']}"
+    )
+
+    print(
+        f"Costume cel save failures:       "
+        f"{costume_stats['save_failures']}"
+    )
+
+    print(
+        f"Unsupported costume formats:     "
+        f"{costume_stats['unsupported_formats']}"
+    )
+
+    print(
+        f"Costumes with problems:          "
+        f"{len(problem_costumes)}"
+    )
+
+    if problems:
+        print()
+        print("Problem details:")
+
+        max_problem_lines = 50
+
+        for problem in problems[:max_problem_lines]:
+
+            location = (
+                f"disk{problem['disk']:02} / "
+                f"room_{problem['room']:02} / "
+                f"costume_{problem['costume']:02}"
+            )
+
+            if problem["cel"] is not None:
+                location += (
+                    f" / cel_{problem['cel']:03}"
+                )
+
+            print(
+                f"  {location}: "
+                f"{problem['message']}"
+            )
+
+        if len(problems) > max_problem_lines:
+            print(
+                f"  ... plus "
+                f"{len(problems) - max_problem_lines} "
+                f"additional problems."
+            )
+
+    else:
+        print()
+        print("No costume extraction problems recorded.")
+
+    print("=" * 70)
 
 
 def decode_strip_ega(strip_payload, height):
@@ -626,6 +1246,195 @@ def decode_strip_ega(strip_payload, height):
                 write_pixel(solid_colour)
 
     return columns, src
+
+
+def decode_costume_cel_ami(cel_payload, width, height):
+    """
+    Decode one 16-colour Amiga SCUMM costume cel.
+
+    Costume pixels are stored using BYLE RLE. The high nibble
+    identifies the colour and the low nibble gives the run length.
+    A zero run nibble means the following byte contains the length.
+
+    Amiga costume pixels are decoded vertically, column by column.
+
+    Args:
+        cel_payload: Compressed costume cel pixel data.
+        width: Cel width in pixels.
+        height: Cel height in pixels.
+
+    Returns:
+        A tuple containing:
+            - A flat row-major list of decoded colour indices suitable
+              for Pillow.
+            - The number of compressed bytes consumed.
+
+    Raises:
+        ValueError: If the compressed data ends before the complete
+            cel has been decoded.
+    """
+
+    rows = [
+        [0 for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    src = 0
+    x = 0
+    y = 0
+
+    def write_pixel(colour):
+        nonlocal x, y
+
+        if x >= width:
+            raise ValueError(
+                "Costume decoder attempted to write beyond "
+                "the cel width."
+            )
+
+        rows[y][x] = colour
+
+        y += 1
+
+        if y >= height:
+            y = 0
+            x += 1
+
+    while x < width:
+
+        if src >= len(cel_payload):
+            raise ValueError(
+                "Costume cel data ended before all pixels "
+                "were decoded."
+            )
+
+        value = cel_payload[src]
+        src += 1
+
+        colour = value >> 4
+        run = value & 0x0F
+
+        if run == 0:
+            if src >= len(cel_payload):
+                raise ValueError(
+                    "Missing extended costume run length."
+                )
+
+            run = cel_payload[src]
+            src += 1
+
+        for _ in range(run):
+            write_pixel(colour)
+
+    pixels = [
+        pixel
+        for row in rows
+        for pixel in row
+    ]
+
+    return pixels, src
+
+
+def read_signed_le16(data, offset):
+    """
+    Read a signed 16-bit little-endian integer.
+    """
+
+    value = int.from_bytes(
+        data[offset:offset + 2],
+        "little"
+    )
+
+    if value >= 0x8000:
+        value -= 0x10000
+
+    return value
+
+
+def save_costume_cel(
+    pixels,
+    width,
+    height,
+    costume_palette,
+    room_palette,
+    disk_number,
+    room_number,
+    costume_number,
+    cel_number
+):
+    """
+    Save a decoded costume cel as a transparent indexed PNG.
+
+    Costume colour indices map through the costume's own 16-entry
+    palette table into the containing room's palette.
+
+    Colour index 0 is treated as transparent.
+
+    Args:
+        pixels: Flat list of decoded 4-bit costume colour indices.
+        width: Cel width in pixels.
+        height: Cel height in pixels.
+        costume_palette: Sixteen room-palette indices from the CO.
+        room_palette: Room palette as RGB tuples.
+        disk_number: Source disk number.
+        room_number: Sequential room index within the source disk.
+        costume_number: Sequential CO index within the LF resource.
+        cel_number: Sequential unique cel number within the costume.
+    """
+
+    image = Image.new(
+        "P",
+        (width, height)
+    )
+
+    image.putdata(pixels)
+
+    png_palette = []
+
+    for palette_index in costume_palette:
+        if palette_index >= len(room_palette):
+            raise ValueError(
+                f"Costume palette index {palette_index} "
+                f"is outside the room palette."
+            )
+
+        r, g, b = room_palette[palette_index]
+        png_palette.extend([r, g, b])
+
+    png_palette.extend(
+        [0, 0, 0] * (256 - 16)
+    )
+
+    image.putpalette(png_palette)
+
+    output_dir = os.path.join(
+        COSTUMES_OUTPUT_DIR,
+        f"disk{disk_number:02}",
+        f"room_{room_number:02}",
+        f"costume_{costume_number:02}"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    filename = os.path.join(
+        output_dir,
+        f"cel_{cel_number:03}.png"
+    )
+
+    image.save(
+        filename,
+        optimize=True,
+        bits=4,
+        transparency=0
+    )
+
+    print(
+        f"    Costume cel saved as '{filename}' "
+        f"({width}x{height})"
+    )
 
 
 def save_room_image(
@@ -1312,10 +2121,17 @@ def parse_bm(
 # Entry point
 if __name__ == '__main__':
 
-    print(f"MonkeyIslandAmigaGraphics v{__version__}")
+    print(
+        f"MonkeyIslandAmigaGraphics "
+        f"v{__version__}"
+    )
+
+    costume_stats = create_costume_stats()
 
     for disk_number in range(1, 5):
-        filepath = f'resource/disk{disk_number:02}.lec'
+        filepath = (
+            f'resource/disk{disk_number:02}.lec'
+        )
 
         print()
         print("=" * 70)
@@ -1324,5 +2140,10 @@ if __name__ == '__main__':
 
         parse_lec_header_and_fo(
             filepath,
-            disk_number
+            disk_number,
+            costume_stats
         )
+
+    print_costume_summary(
+        costume_stats
+    )
