@@ -256,7 +256,7 @@ during investigation of the original data.
 
 ## Game Data and Copyright
 
-Original game files and extracted game artwork are **not included** with this project.
+Original game data files are **not included** with this project. A small number of extracted PNG images are included solely as examples of the program's output.
 
 Users must provide their own legally obtained copy of the relevant game data.
 
