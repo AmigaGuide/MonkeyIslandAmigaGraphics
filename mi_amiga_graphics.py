@@ -4,6 +4,7 @@ from PIL import Image, ImageDraw, ImageFont
 ROOMS_OUTPUT_DIR    = "Rooms"
 PALETTES_OUTPUT_DIR = "Palettes"
 COSTUMES_OUTPUT_DIR = "Costumes"
+OBJECTS_OUTPUT_DIR  = "Objects"
 
 __version__ = "1.2.0"
 
@@ -33,6 +34,159 @@ CHUNK_LABELS = {
 }
 
 
+def create_costume_stats():
+    """
+    Create counters used to summarise costume extraction.
+
+    Returns:
+        A dictionary containing costume extraction counters and
+        recorded problem details.
+    """
+
+    return {
+        "costumes_processed": 0,
+        "cel_candidates": 0,
+        "cels_saved": 0,
+        "zero_size": 0,
+        "implausible_size": 0,
+        "decode_failures": 0,
+        "save_failures": 0,
+        "unsupported_formats": 0,
+        "problems": []
+    }
+
+
+def print_costume_summary(costume_stats):
+    """
+    Print a summary of costume extraction results.
+
+    Args:
+        costume_stats: Statistics dictionary populated while
+            processing CO costume resources.
+    """
+
+    problems = costume_stats["problems"]
+
+    problem_costumes = {
+        (
+            problem["disk"],
+            problem["room"],
+            problem["costume"]
+        )
+        for problem in problems
+    }
+
+    print()
+    print("=" * 70)
+    print("COSTUME EXTRACTION SUMMARY")
+    print("=" * 70)
+
+    print(
+        f"CO resources processed:          "
+        f"{costume_stats['costumes_processed']}"
+    )
+
+    print(
+        f"Unique cel candidates found:     "
+        f"{costume_stats['cel_candidates']}"
+    )
+
+    print(
+        f"Costume cels saved:              "
+        f"{costume_stats['cels_saved']}"
+    )
+
+    print()
+    print(
+        f"Skipped zero-size cels:          "
+        f"{costume_stats['zero_size']}"
+    )
+
+    print(
+        f"Skipped implausible dimensions: "
+        f"{costume_stats['implausible_size']}"
+    )
+
+    print(
+        f"Cel decode failures:             "
+        f"{costume_stats['decode_failures']}"
+    )
+
+    print(
+        f"Costume cel save failures:       "
+        f"{costume_stats['save_failures']}"
+    )
+
+    print(
+        f"Unsupported costume formats:     "
+        f"{costume_stats['unsupported_formats']}"
+    )
+
+    print(
+        f"Costumes with problems:          "
+        f"{len(problem_costumes)}"
+    )
+
+    if problems:
+        print()
+        print("Problem details:")
+
+        max_problem_lines = 50
+
+        for problem in problems[:max_problem_lines]:
+
+            location = (
+                f"disk{problem['disk']:02} / "
+                f"room_{problem['room']:02} / "
+                f"costume_{problem['costume']:02}"
+            )
+
+            if problem["cel"] is not None:
+                location += (
+                    f" / cel_{problem['cel']:03}"
+                )
+
+            print(
+                f"  {location}: "
+                f"{problem['message']}"
+            )
+
+        if len(problems) > max_problem_lines:
+            print(
+                f"  ... plus "
+                f"{len(problems) - max_problem_lines} "
+                f"additional problems."
+            )
+
+    else:
+        print()
+        print("No costume extraction problems recorded.")
+
+    print("=" * 70)
+
+
+def read_signed_le16(data, offset):
+    """
+    Read a signed 16-bit little-endian integer.
+
+    Args:
+        data: Byte sequence containing the value.
+        offset: Offset of the two-byte value within data.
+
+    Returns:
+        The decoded signed integer.
+    """
+    value = int.from_bytes(
+        data[offset:offset + 2],
+        "little"
+    )
+
+    if value >= 0x8000:
+        value -= 0x10000
+
+    return value
+
+
 def parse_lec_header_and_fo(
     filepath,
     disk_number,
@@ -48,6 +202,8 @@ def parse_lec_header_and_fo(
     Args:
         filepath: Path to the diskXX.lec resource file.
         disk_number: Source disk number, used when organising output.
+        costume_stats: Statistics dictionary updated during costume
+            extraction.
     """
     with open(filepath, 'rb') as f:
         raw_data = f.read()
@@ -119,13 +275,16 @@ def parse_lf(
 
     Validates the LF header and its ID against the corresponding FO
     entry, enumerates the chunks contained within the LF block, and
-    passes any RO room chunks to parse_ro().
+    passes the RO room resource to parse_ro(), then processes any
+    LF-level CO costume resources using the room palette.
 
     Args:
         lf_data: Complete LF block, including its chunk header.
         file_index: Sequential index of the embedded file on this disk.
         fo_id_byte: Resource ID obtained from the FO table.
         disk_number: Source disk number.
+        costume_stats: Statistics dictionary updated during costume
+            extraction.
     """
     print(f"\nFile {file_index}")
     declared_size = int.from_bytes(lf_data[0:4], 'little')
@@ -146,7 +305,6 @@ def parse_lf(
 
     pointer = 8
     contents = []
-    chunk_counts = {}
 
     print("  Contained chunks:")
     while pointer + 6 <= len(lf_data):
@@ -156,7 +314,6 @@ def parse_lf(
 
         print(f"    Offset {pointer:>5}: ID='{chunk_id}', Label='{label}', Size={chunk_size} bytes")
         contents.append((pointer, chunk_id, chunk_size))
-        chunk_counts[chunk_id] = chunk_counts.get(chunk_id, 0) + 1
         pointer += chunk_size
 
         if pointer == len(lf_data):
@@ -219,15 +376,19 @@ def parse_ro(
     """
     Parse an RO room resource and locate its graphical components.
 
-    Enumerates the room subchunks and obtains the room dimensions
-    from HD, the palette from PA, and the main background bitmap from
-    BM. Once the required information is available, the BM resource
-    is passed to parse_bm() for decoding.
+    Enumerates the room subchunks, obtains room dimensions from HD,
+    the palette from PA, the main background from BM, and object
+    graphics from OI. The room palette is returned so LF-level
+    costume resources can use it during decoding.
 
     Args:
         ro_data: Complete RO block, including its chunk header.
         file_index: Sequential index of the embedded file on this disk.
         disk_number: Source disk number.
+
+    Returns:
+        The room palette as a list of RGB tuples, or None if no usable
+        palette was found.
     """
     if len(ro_data) < 6:
         print("  RO data too short to be valid.")
@@ -303,7 +464,7 @@ def parse_ro(
         )
         return
 
-    # Values required later by the BM decoder.
+    # Room values required by the graphics decoders.
     width = None
     height = None
     palette_rgb = None
@@ -473,7 +634,6 @@ def parse_pa(pa_data, room_index, disk_number):
     )
 
     swatch_size = 50
-    padding = 10
     font_size = 10
     cols = 8
     rows = (colour_count + cols - 1) // cols
@@ -483,10 +643,7 @@ def parse_pa(pa_data, room_index, disk_number):
     img = Image.new('RGB', (img_width, img_height), color='white')
     draw = ImageDraw.Draw(img)
 
-    try:
-        font = ImageFont.load_default()
-    except:
-        font = None
+    font = ImageFont.load_default()
 
     for idx, (r, g, b) in enumerate(colours):
         x = (idx % cols) * swatch_size
@@ -506,6 +663,940 @@ def parse_pa(pa_data, room_index, disk_number):
     print(f"    Palette image saved as '{filename}'")
 
     return colours
+
+
+def decode_strip_ega(strip_payload, height):
+    """
+    Decode one 8-pixel-wide BMCOMP_PIX32 bitmap strip.
+
+    Implements the decoding behaviour of ScummVM's drawStripEGA()
+    routine used by the Amiga version of The Secret of Monkey Island.
+    The compressed stream supports solid-colour runs, copies from the
+    previous column, alternating two-colour runs, and extended run
+    lengths.
+
+    Pixels are decoded vertically, one column at a time, across the
+    eight columns that make up a SCUMM bitmap strip.
+
+    Args:
+        strip_payload: Compressed strip data after the compression byte.
+        height: Height of the room bitmap in pixels.
+
+    Returns:
+        A tuple containing:
+            - Eight columns of decoded 4-bit colour indices (0-15).
+            - The number of compressed payload bytes consumed.
+
+    Raises:
+        ValueError: If the compressed data is malformed or ends before
+            all eight columns have been decoded.
+    """
+    columns = [
+        [0 for _ in range(height)]
+        for _ in range(8)
+    ]
+
+    src = 0
+    x = 0
+    y = 0
+
+    def write_pixel(colour):
+        nonlocal x, y
+
+        if x >= 8:
+            raise ValueError(
+                "Decoder attempted to write beyond "
+                "the 8-pixel strip width."
+            )
+
+        columns[x][y] = colour
+
+        y += 1
+
+        if y >= height:
+            y = 0
+            x += 1
+
+    while x < 8:
+
+        if src >= len(strip_payload):
+            raise ValueError(
+                f"Strip data ended early at column {x}, row {y}."
+            )
+
+        colour = strip_payload[src]
+        src += 1
+
+        # ----------------------------------------------------------
+        # 1xxxxxxx
+        # ----------------------------------------------------------
+        if colour & 0x80:
+
+            run = colour & 0x3F
+
+            # ------------------------------------------------------
+            # 11xxxxxx
+            #
+            # Alternate between two colours.
+            # ------------------------------------------------------
+            if colour & 0x40:
+
+                if src >= len(strip_payload):
+                    raise ValueError(
+                        "Missing alternating colour byte."
+                    )
+
+                colour_pair = strip_payload[src]
+                src += 1
+
+                if run == 0:
+
+                    if src >= len(strip_payload):
+                        raise ValueError(
+                            "Missing extended alternating run length."
+                        )
+
+                    run = strip_payload[src]
+                    src += 1
+
+                high_colour = (colour_pair >> 4) & 0x0F
+                low_colour = colour_pair & 0x0F
+
+                for z in range(run):
+
+                    if z & 1:
+                        write_pixel(low_colour)
+                    else:
+                        write_pixel(high_colour)
+
+            # ------------------------------------------------------
+            # 10xxxxxx
+            #
+            # Copy from previous column.
+            # ------------------------------------------------------
+            else:
+
+                if run == 0:
+
+                    if src >= len(strip_payload):
+                        raise ValueError(
+                            "Missing extended copy run length."
+                        )
+
+                    run = strip_payload[src]
+                    src += 1
+
+                for _ in range(run):
+
+                    if x == 0:
+                        raise ValueError(
+                            "Previous-column copy encountered "
+                            "while decoding column 0."
+                        )
+
+                    colour_from_previous_column = columns[x - 1][y]
+
+                    write_pixel(
+                        colour_from_previous_column
+                    )
+
+        # ----------------------------------------------------------
+        # 0xxxxxxx
+        #
+        # Solid colour run.
+        # ----------------------------------------------------------
+        else:
+
+            run = colour >> 4
+
+            if run == 0:
+
+                if src >= len(strip_payload):
+                    raise ValueError(
+                        "Missing extended solid run length."
+                    )
+
+                run = strip_payload[src]
+                src += 1
+
+            solid_colour = colour & 0x0F
+
+            for _ in range(run):
+                write_pixel(solid_colour)
+
+    return columns, src
+
+
+def parse_bm(
+    bm_data,
+    file_number,
+    width,
+    height,
+    palette_rgb,
+    disk_number
+):
+    """
+    Parse and decode the main BM room-background resource.
+
+    Reads the bitmap payload and its SMAP-style strip-offset table.
+    Each room is divided into 8-pixel-wide compressed strips whose
+    first byte identifies the compression method. The strip table and
+    room information are passed to save_room_image() for reconstruction.
+
+    Additional diagnostic output is produced to document the strip
+    structure, compression bytes, and first-strip decoding behaviour
+    used while reverse-engineering the Amiga bitmap format.
+
+    Args:
+        bm_data: Complete BM chunk, including its chunk header.
+        file_number: Sequential index of the embedded file on this disk.
+        width: Room width obtained from the HD chunk.
+        height: Room height obtained from the HD chunk.
+        palette_rgb: Room palette obtained from the PA chunk.
+        disk_number: Source disk number.
+    """
+    print("  >>> parse_bm() called")
+    bm_size = int.from_bytes(bm_data[0:4], 'little')
+    print(f"  Declared size: {bm_size} bytes")
+
+    header = bm_data[4:6].decode('ascii', errors='replace')
+    if header != "BM":
+        print("  Invalid BM header.")
+        return
+
+    print(f"  Header found: '{header}'")
+
+    bm_raw = bm_data[6:]
+    print(f"  bm_raw: {len(bm_raw)}")
+
+    # Show first 10 bytes in hex and ASCII
+    hex_bytes = ' '.join(f'{b:02X}' for b in bm_raw[:10])
+    ascii_chars = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in bm_raw[:10])
+    print(f"  First 10 bytes (hex):   {hex_bytes}")
+    print(f"  First 10 bytes (ASCII): {ascii_chars}")
+
+    strip_count = (width + 7) // 8
+
+    smap_length = int.from_bytes(
+        bm_raw[0:4],
+        'little'
+    )
+
+    print(f"  SMAP length: {smap_length} bytes")
+    print(f"  Room requires {strip_count} strips")
+
+    strip_offsets = []
+
+    for strip_index in range(strip_count):
+        offset_pos = 4 + strip_index * 4
+
+        strip_offset = int.from_bytes(
+            bm_raw[offset_pos:offset_pos + 4],
+            'little'
+        )
+
+        strip_offsets.append(strip_offset)
+
+        print(
+            f"    Strip {strip_index:02}: "
+            f"offset {strip_offset}"
+        )
+
+    try:
+        save_room_image(
+            bm_raw,
+            strip_offsets,
+            smap_length,
+            width,
+            height,
+            palette_rgb,
+            file_number,
+            disk_number
+        )
+
+    except ValueError as error:
+        print(
+            f"  Room image decode failed: {error}"
+        )
+
+    strip_index = 0
+    strip_start = strip_offsets[strip_index]
+    strip_end = strip_offsets[strip_index + 1]
+
+    compression_code = bm_raw[strip_start]
+    strip_payload = bm_raw[strip_start + 1:strip_end]
+
+    try:
+        decoded_columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        print()
+        print("  Decoded strip check")
+        print(f"    Columns decoded:    {len(decoded_columns)}")
+        print(f"    Pixels per column:  {height}")
+        print(f"    Total pixels:       {8 * height}")
+        print(f"    Payload bytes used: {bytes_used}")
+        print(f"    Payload bytes avail:{len(strip_payload)}")
+
+        print("    First 16 pixels of each column:")
+
+        for column_index, column in enumerate(decoded_columns):
+            pixels = ' '.join(
+                f'{value:02d}'
+                for value in column[:16]
+            )
+
+            print(
+                f"      Column {column_index}: {pixels}"
+            )
+
+    except ValueError as error:
+        print()
+        print(f"  Strip decode failed: {error}")
+
+    print()
+    print("  Chunk check - first strip")
+    print(f"    Strip index:       {strip_index}")
+    print(f"    Strip start:       {strip_start}")
+    print(f"    Strip end:         {strip_end}")
+    print(f"    Total strip bytes: {strip_end - strip_start}")
+    print(f"    Compression code:  0x{compression_code:02X}")
+    print(f"    Payload bytes:     {len(strip_payload)}")
+
+    preview = ' '.join(f'{b:02X}' for b in strip_payload[:32])
+    print(f"    First 32 payload bytes:")
+    print(f"      {preview}")
+
+    print("  Strip compression bytes:")
+
+    for strip_index, strip_offset in enumerate(strip_offsets):
+        compression_code = bm_raw[strip_offset]
+
+        print(
+            f"    Strip {strip_index:02}: "
+            f"offset {strip_offset}, "
+            f"compression byte = 0x{compression_code:02X} "
+            f"({compression_code})"
+        )
+
+    expected_first_offset = 4 + strip_count * 4
+
+    print(
+        f"  Expected first strip offset: "
+        f"{expected_first_offset}"
+    )
+
+    print(
+        f"  Actual first strip offset:   "
+        f"{strip_offsets[0]}"
+    )
+
+
+def save_room_image(
+    bm_raw,
+    strip_offsets,
+    smap_length,
+    width,
+    height,
+    palette_rgb,
+    file_number,
+    disk_number
+):
+    """
+    Decode and save a complete Amiga SCUMM room background.
+
+    Decodes each 8-pixel-wide BMCOMP_PIX32 strip, assembles the strips
+    horizontally into the complete room bitmap, and saves the result
+    as a 16-colour indexed PNG.
+
+    The decoder produces 4-bit colour values 0-15. For the Amiga
+    version of The Secret of Monkey Island these correspond to source
+    room palette entries 16-31, which are remapped to PNG palette
+    entries 0-15.
+
+    Args:
+        bm_raw: BM payload containing the strip table and compressed data.
+        strip_offsets: Offsets of the compressed bitmap strips.
+        smap_length: Length of the bitmap/SMAP data within the BM payload.
+        width: Width of the complete room bitmap in pixels.
+        height: Height of the complete room bitmap in pixels.
+        palette_rgb: Room palette as a list of RGB tuples.
+        file_number: Sequential index used in the output filename.
+        disk_number: Source disk number used for the output directory.
+
+    Raises:
+        ValueError: If the palette, strip table, compression method, or
+            decoded strip data is inconsistent with the expected format.
+    """
+    if len(palette_rgb) < 32:
+        raise ValueError(
+            f"Room palette contains only {len(palette_rgb)} colours; "
+            "32 are required."
+        )
+
+    strip_count = len(strip_offsets)
+
+    if strip_count * 8 != width:
+        raise ValueError(
+            f"Strip count does not match room width: "
+            f"{strip_count} strips = {strip_count * 8} pixels, "
+            f"room width = {width}."
+        )
+
+    # Store 4-bit palette indices directly.
+    pixels = [
+        [0 for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    for strip_index, strip_start in enumerate(strip_offsets):
+
+        if strip_index + 1 < strip_count:
+            strip_end = strip_offsets[strip_index + 1]
+        else:
+            strip_end = smap_length
+
+        if strip_start >= strip_end:
+            raise ValueError(
+                f"Strip {strip_index}: invalid range "
+                f"{strip_start}..{strip_end}."
+            )
+
+        compression_code = bm_raw[strip_start]
+
+        if compression_code != 0x0A:
+            raise ValueError(
+                f"Strip {strip_index}: unsupported compression "
+                f"code 0x{compression_code:02X}."
+            )
+
+        strip_payload = bm_raw[
+            strip_start + 1:strip_end
+        ]
+
+        columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        if bytes_used != len(strip_payload):
+            raise ValueError(
+                f"Strip {strip_index}: decoder used {bytes_used} "
+                f"of {len(strip_payload)} payload bytes."
+            )
+
+        base_x = strip_index * 8
+
+        for column_index in range(8):
+            x = base_x + column_index
+
+            for y in range(height):
+                pixels[y][x] = columns[column_index][y]
+
+    # Create indexed-colour image.
+    image = Image.new(
+        'P',
+        (width, height)
+    )
+
+    flat_pixels = [
+        pixel
+        for row in pixels
+        for pixel in row
+    ]
+
+    image.putdata(flat_pixels)
+
+    # Pillow palettes must contain up to 256 RGB entries.
+    # We use source palette entries 16-31 as PNG entries 0-15.
+    png_palette = []
+
+    for r, g, b in palette_rgb[16:32]:
+        png_palette.extend([r, g, b])
+
+    # Pad remaining palette entries to 256 colours.
+    png_palette.extend(
+        [0, 0, 0] * (256 - 16)
+    )
+
+    image.putpalette(png_palette)
+
+    output_dir = os.path.join(
+        ROOMS_OUTPUT_DIR,
+        f"disk{disk_number:02}"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    filename = os.path.join(
+        output_dir,
+        f'room_{file_number:02}.png'
+    )
+
+    image.save(
+        filename,
+        optimize=True,
+        bits=4
+    )
+
+    print(
+        f"  Indexed room image saved as '{filename}' "
+        f"({width}x{height}, 16 colours)"
+    )
+
+
+def parse_oi(
+    oi_data,
+    file_number,
+    palette_rgb,
+    disk_number
+):
+    """
+    Parse and decode an OI (Object Image) resource.
+
+    Amiga object images use the same 8-pixel-wide BMCOMP_PIX32
+    strip compression as the main room BM graphics.
+
+    The object width is derived from the strip-offset table.
+    The height is inferred by finding the value for which every
+    compressed strip decodes completely and consumes exactly its
+    available payload.
+
+    Args:
+        oi_data: Complete OI chunk, including its chunk header.
+        file_number: Sequential index of the containing LF resource.
+        palette_rgb: Palette obtained from the room's PA chunk.
+        disk_number: Source disk number.
+    """
+
+    if len(oi_data) < 12:
+        print("  OI chunk too short to contain image data.")
+        return
+
+    print("\n  >>> parse_oi() called")
+
+    oi_size = int.from_bytes(
+        oi_data[0:4],
+        "little"
+    )
+
+    oi_id = oi_data[4:6].decode(
+        "ascii",
+        errors="replace"
+    )
+
+    object_id = int.from_bytes(
+        oi_data[6:8],
+        "little"
+    )
+
+    print(f"  Declared OI size: {oi_size} bytes")
+    print(f"  Header found: '{oi_id}'")
+    print(f"  Object ID: {object_id}")
+
+    if oi_id != "OI":
+        print("  Invalid OI header.")
+        return
+
+    # Bitmap data begins after the OI header and object ID.
+    bitmap_data = oi_data[8:]
+
+    if len(bitmap_data) < 8:
+        print("  OI contains no usable bitmap data.")
+        return
+
+    smap_length = int.from_bytes(
+        bitmap_data[0:4],
+        "little"
+    )
+
+    first_strip_offset = int.from_bytes(
+        bitmap_data[4:8],
+        "little"
+    )
+
+    # Strip table:
+    #
+    #   4-byte SMAP length
+    #   N × 4-byte strip offsets
+    #
+    # Therefore:
+    #
+    #   first_strip_offset = 4 + (N * 4)
+    #
+    if first_strip_offset < 8:
+        print(
+            f"  Invalid first strip offset: "
+            f"{first_strip_offset}"
+        )
+        return
+
+    if (first_strip_offset - 4) % 4 != 0:
+        print(
+            "  First strip offset does not describe "
+            "a valid strip table."
+        )
+        return
+
+    strip_count = (
+        first_strip_offset - 4
+    ) // 4
+
+    width = strip_count * 8
+
+    print(f"  SMAP length: {smap_length} bytes")
+    print(f"  Strip count: {strip_count}")
+    print(f"  Derived width: {width} pixels")
+
+    strip_offsets = []
+
+    for strip_index in range(strip_count):
+        offset_pos = 4 + strip_index * 4
+
+        strip_offset = int.from_bytes(
+            bitmap_data[
+                offset_pos:offset_pos + 4
+            ],
+            "little"
+        )
+
+        strip_offsets.append(strip_offset)
+
+    # Confirm that the object uses the compression format
+    # supported by our existing Amiga decoder.
+    for strip_index, strip_offset in enumerate(
+        strip_offsets
+    ):
+        if strip_offset >= len(bitmap_data):
+            print(
+                f"  Strip {strip_index} offset "
+                f"{strip_offset} is outside OI data."
+            )
+            return
+
+        compression_code = bitmap_data[
+            strip_offset
+        ]
+
+        if compression_code != 0x0A:
+            print(
+                f"  Strip {strip_index}: unsupported "
+                f"compression code "
+                f"0x{compression_code:02X}."
+            )
+            return
+
+    # Infer image height.
+    #
+    # A valid height must allow EVERY strip to:
+    #
+    #   1. decode exactly eight columns, and
+    #   2. consume its entire compressed payload.
+    #
+    valid_heights = []
+
+    for candidate_height in range(1, 257):
+
+        valid = True
+
+        for strip_index, strip_start in enumerate(
+            strip_offsets
+        ):
+
+            if strip_index + 1 < strip_count:
+                strip_end = strip_offsets[
+                    strip_index + 1
+                ]
+            else:
+                strip_end = smap_length
+
+            strip_payload = bitmap_data[
+                strip_start + 1:strip_end
+            ]
+
+            try:
+                _, bytes_used = decode_strip_ega(
+                    strip_payload,
+                    candidate_height
+                )
+
+            except ValueError:
+                valid = False
+                break
+
+            if bytes_used != len(strip_payload):
+                valid = False
+                break
+
+        if valid:
+            valid_heights.append(
+                candidate_height
+            )
+
+    if len(valid_heights) != 1:
+        print(
+            "  Unable to determine a unique object "
+            f"height. Candidates: {valid_heights}"
+        )
+        return
+
+    height = valid_heights[0]
+
+    print(f"  Derived height: {height} pixels")
+    print(
+        f"  Object image dimensions: "
+        f"{width} x {height}"
+    )
+
+    save_object_image(
+        bitmap_data,
+        strip_offsets,
+        smap_length,
+        width,
+        height,
+        palette_rgb,
+        file_number,
+        object_id,
+        disk_number
+    )
+
+
+def save_object_image(
+    bitmap_data,
+    strip_offsets,
+    smap_length,
+    width,
+    height,
+    palette_rgb,
+    file_number,
+    object_id,
+    disk_number
+):
+    """
+    Decode and save one Amiga SCUMM object image.
+
+    The object consists of 8-pixel-wide BMCOMP_PIX32 strips using
+    the same 4-bit colour decoding as room backgrounds.
+
+    Args:
+        bitmap_data: OI bitmap payload containing the strip table.
+        strip_offsets: Offsets of compressed image strips.
+        smap_length: Length of the object's bitmap data.
+        width: Derived object width in pixels.
+        height: Derived object height in pixels.
+        palette_rgb: Palette obtained from the containing room.
+        file_number: Sequential LF index containing the object.
+        object_id: SCUMM object identifier stored in the OI.
+        disk_number: Source disk number.
+    """
+
+    pixels = [
+        [0 for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    strip_count = len(strip_offsets)
+
+    for strip_index, strip_start in enumerate(
+        strip_offsets
+    ):
+
+        if strip_index + 1 < strip_count:
+            strip_end = strip_offsets[
+                strip_index + 1
+            ]
+        else:
+            strip_end = smap_length
+
+        compression_code = bitmap_data[
+            strip_start
+        ]
+
+        if compression_code != 0x0A:
+            raise ValueError(
+                f"Object {object_id}, strip "
+                f"{strip_index}: unsupported "
+                f"compression code "
+                f"0x{compression_code:02X}."
+            )
+
+        strip_payload = bitmap_data[
+            strip_start + 1:strip_end
+        ]
+
+        columns, bytes_used = decode_strip_ega(
+            strip_payload,
+            height
+        )
+
+        if bytes_used != len(strip_payload):
+            raise ValueError(
+                f"Object {object_id}, strip "
+                f"{strip_index}: decoder used "
+                f"{bytes_used} of "
+                f"{len(strip_payload)} bytes."
+            )
+
+        base_x = strip_index * 8
+
+        for column_index in range(8):
+
+            x = base_x + column_index
+
+            for y in range(height):
+                pixels[y][x] = (
+                    columns[column_index][y]
+                )
+
+    image = Image.new(
+        "P",
+        (width, height)
+    )
+
+    image.putdata(
+        [
+            pixel
+            for row in pixels
+            for pixel in row
+        ]
+    )
+
+    # As with BM room backgrounds, decoded values 0-15
+    # map to source room palette entries 16-31.
+    png_palette = []
+
+    for r, g, b in palette_rgb[16:32]:
+        png_palette.extend(
+            [r, g, b]
+        )
+
+    png_palette.extend(
+        [0, 0, 0] * (256 - 16)
+    )
+
+    image.putpalette(
+        png_palette
+    )
+
+    output_dir = os.path.join(
+        OBJECTS_OUTPUT_DIR,
+        f"disk{disk_number:02}",
+        f"room_{file_number:02}"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    filename = os.path.join(
+        output_dir,
+        f"object_{object_id:03}.png"
+    )
+
+    image.save(
+        filename,
+        optimize=True,
+        bits=4
+    )
+
+    print(
+        f"  Indexed object image saved as "
+        f"'{filename}' "
+        f"({width}x{height}, 16 colours)"
+    )
+
+
+def decode_costume_cel_ami(cel_payload, width, height):
+    """
+    Decode one 16-colour Amiga SCUMM costume cel.
+
+    Costume pixels are stored using BYLE RLE. The high nibble
+    identifies the colour and the low nibble gives the run length.
+    A zero run nibble means the following byte contains the length.
+
+    Amiga costume pixels are decoded vertically, column by column.
+
+    Args:
+        cel_payload: Compressed costume cel pixel data.
+        width: Cel width in pixels.
+        height: Cel height in pixels.
+
+    Returns:
+        A tuple containing:
+            - A flat row-major list of decoded colour indices suitable
+              for Pillow.
+            - The number of compressed bytes consumed.
+
+    Raises:
+        ValueError: If the compressed data ends before the complete
+            cel has been decoded.
+    """
+
+    rows = [
+        [0 for _ in range(width)]
+        for _ in range(height)
+    ]
+
+    src = 0
+    x = 0
+    y = 0
+
+    def write_pixel(colour):
+        nonlocal x, y
+
+        if x >= width:
+            raise ValueError(
+                "Costume decoder attempted to write beyond "
+                "the cel width."
+            )
+
+        rows[y][x] = colour
+
+        y += 1
+
+        if y >= height:
+            y = 0
+            x += 1
+
+    while x < width:
+
+        if src >= len(cel_payload):
+            raise ValueError(
+                "Costume cel data ended before all pixels "
+                "were decoded."
+            )
+
+        value = cel_payload[src]
+        src += 1
+
+        colour = value >> 4
+        run = value & 0x0F
+
+        if run == 0:
+            if src >= len(cel_payload):
+                raise ValueError(
+                    "Missing extended costume run length."
+                )
+
+            run = cel_payload[src]
+            src += 1
+
+        for _ in range(run):
+            write_pixel(colour)
+
+    pixels = [
+        pixel
+        for row in rows
+        for pixel in row
+    ]
+
+    return pixels, src
 
 
 def parse_co(
@@ -532,6 +1623,8 @@ def parse_co(
         disk_number: Source disk number.
         room_number: Sequential room index within the disk.
         costume_number: Sequential CO index within the LF resource.
+        costume_stats: Statistics dictionary used to record costume
+            extraction results and problems.
     """
 
     if len(co_data) < 24:
@@ -955,402 +2048,6 @@ def parse_co(
             })
 
 
-def create_costume_stats():
-    """
-    Create counters used to summarise costume extraction.
-
-    Returns:
-        A dictionary containing costume extraction counters and
-        recorded problem details.
-    """
-
-    return {
-        "costumes_processed": 0,
-        "cel_candidates": 0,
-        "cels_saved": 0,
-        "zero_size": 0,
-        "implausible_size": 0,
-        "decode_failures": 0,
-        "save_failures": 0,
-        "unsupported_formats": 0,
-        "problems": []
-    }
-
-
-def print_costume_summary(costume_stats):
-    """
-    Print a summary of costume extraction results.
-
-    Args:
-        costume_stats: Statistics dictionary populated while
-            processing CO costume resources.
-    """
-
-    problems = costume_stats["problems"]
-
-    problem_costumes = {
-        (
-            problem["disk"],
-            problem["room"],
-            problem["costume"]
-        )
-        for problem in problems
-    }
-
-    print()
-    print("=" * 70)
-    print("COSTUME EXTRACTION SUMMARY")
-    print("=" * 70)
-
-    print(
-        f"CO resources processed:          "
-        f"{costume_stats['costumes_processed']}"
-    )
-
-    print(
-        f"Unique cel candidates found:     "
-        f"{costume_stats['cel_candidates']}"
-    )
-
-    print(
-        f"Costume cels saved:              "
-        f"{costume_stats['cels_saved']}"
-    )
-
-    print()
-    print(
-        f"Skipped zero-size cels:          "
-        f"{costume_stats['zero_size']}"
-    )
-
-    print(
-        f"Skipped implausible dimensions: "
-        f"{costume_stats['implausible_size']}"
-    )
-
-    print(
-        f"Cel decode failures:             "
-        f"{costume_stats['decode_failures']}"
-    )
-
-    print(
-        f"Costume cel save failures:       "
-        f"{costume_stats['save_failures']}"
-    )
-
-    print(
-        f"Unsupported costume formats:     "
-        f"{costume_stats['unsupported_formats']}"
-    )
-
-    print(
-        f"Costumes with problems:          "
-        f"{len(problem_costumes)}"
-    )
-
-    if problems:
-        print()
-        print("Problem details:")
-
-        max_problem_lines = 50
-
-        for problem in problems[:max_problem_lines]:
-
-            location = (
-                f"disk{problem['disk']:02} / "
-                f"room_{problem['room']:02} / "
-                f"costume_{problem['costume']:02}"
-            )
-
-            if problem["cel"] is not None:
-                location += (
-                    f" / cel_{problem['cel']:03}"
-                )
-
-            print(
-                f"  {location}: "
-                f"{problem['message']}"
-            )
-
-        if len(problems) > max_problem_lines:
-            print(
-                f"  ... plus "
-                f"{len(problems) - max_problem_lines} "
-                f"additional problems."
-            )
-
-    else:
-        print()
-        print("No costume extraction problems recorded.")
-
-    print("=" * 70)
-
-
-def decode_strip_ega(strip_payload, height):
-    """
-    Decode one 8-pixel-wide BMCOMP_PIX32 bitmap strip.
-
-    Implements the decoding behaviour of ScummVM's drawStripEGA()
-    routine used by the Amiga version of The Secret of Monkey Island.
-    The compressed stream supports solid-colour runs, copies from the
-    previous column, alternating two-colour runs, and extended run
-    lengths.
-
-    Pixels are decoded vertically, one column at a time, across the
-    eight columns that make up a SCUMM bitmap strip.
-
-    Args:
-        strip_payload: Compressed strip data after the compression byte.
-        height: Height of the room bitmap in pixels.
-
-    Returns:
-        A tuple containing:
-            - Eight columns of decoded 4-bit colour indices (0-15).
-            - The number of compressed payload bytes consumed.
-
-    Raises:
-        ValueError: If the compressed data is malformed or ends before
-            all eight columns have been decoded.
-    """
-    columns = [
-        [0 for _ in range(height)]
-        for _ in range(8)
-    ]
-
-    src = 0
-    x = 0
-    y = 0
-
-    def write_pixel(colour):
-        nonlocal x, y
-
-        if x >= 8:
-            raise ValueError(
-                "Decoder attempted to write beyond "
-                "the 8-pixel strip width."
-            )
-
-        columns[x][y] = colour
-
-        y += 1
-
-        if y >= height:
-            y = 0
-            x += 1
-
-    while x < 8:
-
-        if src >= len(strip_payload):
-            raise ValueError(
-                f"Strip data ended early at column {x}, row {y}."
-            )
-
-        colour = strip_payload[src]
-        src += 1
-
-        # ----------------------------------------------------------
-        # 1xxxxxxx
-        # ----------------------------------------------------------
-        if colour & 0x80:
-
-            run = colour & 0x3F
-
-            # ------------------------------------------------------
-            # 11xxxxxx
-            #
-            # Alternate between two colours.
-            # ------------------------------------------------------
-            if colour & 0x40:
-
-                if src >= len(strip_payload):
-                    raise ValueError(
-                        "Missing alternating colour byte."
-                    )
-
-                colour_pair = strip_payload[src]
-                src += 1
-
-                if run == 0:
-
-                    if src >= len(strip_payload):
-                        raise ValueError(
-                            "Missing extended alternating run length."
-                        )
-
-                    run = strip_payload[src]
-                    src += 1
-
-                high_colour = (colour_pair >> 4) & 0x0F
-                low_colour = colour_pair & 0x0F
-
-                for z in range(run):
-
-                    if z & 1:
-                        write_pixel(low_colour)
-                    else:
-                        write_pixel(high_colour)
-
-            # ------------------------------------------------------
-            # 10xxxxxx
-            #
-            # Copy from previous column.
-            # ------------------------------------------------------
-            else:
-
-                if run == 0:
-
-                    if src >= len(strip_payload):
-                        raise ValueError(
-                            "Missing extended copy run length."
-                        )
-
-                    run = strip_payload[src]
-                    src += 1
-
-                for _ in range(run):
-
-                    if x == 0:
-                        raise ValueError(
-                            "Previous-column copy encountered "
-                            "while decoding column 0."
-                        )
-
-                    colour_from_previous_column = columns[x - 1][y]
-
-                    write_pixel(
-                        colour_from_previous_column
-                    )
-
-        # ----------------------------------------------------------
-        # 0xxxxxxx
-        #
-        # Solid colour run.
-        # ----------------------------------------------------------
-        else:
-
-            run = colour >> 4
-
-            if run == 0:
-
-                if src >= len(strip_payload):
-                    raise ValueError(
-                        "Missing extended solid run length."
-                    )
-
-                run = strip_payload[src]
-                src += 1
-
-            solid_colour = colour & 0x0F
-
-            for _ in range(run):
-                write_pixel(solid_colour)
-
-    return columns, src
-
-
-def decode_costume_cel_ami(cel_payload, width, height):
-    """
-    Decode one 16-colour Amiga SCUMM costume cel.
-
-    Costume pixels are stored using BYLE RLE. The high nibble
-    identifies the colour and the low nibble gives the run length.
-    A zero run nibble means the following byte contains the length.
-
-    Amiga costume pixels are decoded vertically, column by column.
-
-    Args:
-        cel_payload: Compressed costume cel pixel data.
-        width: Cel width in pixels.
-        height: Cel height in pixels.
-
-    Returns:
-        A tuple containing:
-            - A flat row-major list of decoded colour indices suitable
-              for Pillow.
-            - The number of compressed bytes consumed.
-
-    Raises:
-        ValueError: If the compressed data ends before the complete
-            cel has been decoded.
-    """
-
-    rows = [
-        [0 for _ in range(width)]
-        for _ in range(height)
-    ]
-
-    src = 0
-    x = 0
-    y = 0
-
-    def write_pixel(colour):
-        nonlocal x, y
-
-        if x >= width:
-            raise ValueError(
-                "Costume decoder attempted to write beyond "
-                "the cel width."
-            )
-
-        rows[y][x] = colour
-
-        y += 1
-
-        if y >= height:
-            y = 0
-            x += 1
-
-    while x < width:
-
-        if src >= len(cel_payload):
-            raise ValueError(
-                "Costume cel data ended before all pixels "
-                "were decoded."
-            )
-
-        value = cel_payload[src]
-        src += 1
-
-        colour = value >> 4
-        run = value & 0x0F
-
-        if run == 0:
-            if src >= len(cel_payload):
-                raise ValueError(
-                    "Missing extended costume run length."
-                )
-
-            run = cel_payload[src]
-            src += 1
-
-        for _ in range(run):
-            write_pixel(colour)
-
-    pixels = [
-        pixel
-        for row in rows
-        for pixel in row
-    ]
-
-    return pixels, src
-
-
-def read_signed_le16(data, offset):
-    """
-    Read a signed 16-bit little-endian integer.
-    """
-
-    value = int.from_bytes(
-        data[offset:offset + 2],
-        "little"
-    )
-
-    if value >= 0x8000:
-        value -= 0x10000
-
-    return value
-
-
 def save_costume_cel(
     pixels,
     width,
@@ -1434,687 +2131,6 @@ def save_costume_cel(
     print(
         f"    Costume cel saved as '{filename}' "
         f"({width}x{height})"
-    )
-
-
-def save_room_image(
-    bm_raw,
-    strip_offsets,
-    smap_length,
-    width,
-    height,
-    palette_rgb,
-    file_number,
-    disk_number
-):
-    """
-    Decode and save a complete Amiga SCUMM room background.
-
-    Decodes each 8-pixel-wide BMCOMP_PIX32 strip, assembles the strips
-    horizontally into the complete room bitmap, and saves the result
-    as a 16-colour indexed PNG.
-
-    The decoder produces 4-bit colour values 0-15. For the Amiga
-    version of The Secret of Monkey Island these correspond to source
-    room palette entries 16-31, which are remapped to PNG palette
-    entries 0-15.
-
-    Args:
-        bm_raw: BM payload containing the strip table and compressed data.
-        strip_offsets: Offsets of the compressed bitmap strips.
-        smap_length: Length of the bitmap/SMAP data within the BM payload.
-        width: Width of the complete room bitmap in pixels.
-        height: Height of the complete room bitmap in pixels.
-        palette_rgb: Room palette as a list of RGB tuples.
-        file_number: Sequential index used in the output filename.
-        disk_number: Source disk number used for the output directory.
-
-    Raises:
-        ValueError: If the palette, strip table, compression method, or
-            decoded strip data is inconsistent with the expected format.
-    """
-    if len(palette_rgb) < 32:
-        raise ValueError(
-            f"Room palette contains only {len(palette_rgb)} colours; "
-            "32 are required."
-        )
-
-    strip_count = len(strip_offsets)
-
-    if strip_count * 8 != width:
-        raise ValueError(
-            f"Strip count does not match room width: "
-            f"{strip_count} strips = {strip_count * 8} pixels, "
-            f"room width = {width}."
-        )
-
-    # Store 4-bit palette indices directly.
-    pixels = [
-        [0 for _ in range(width)]
-        for _ in range(height)
-    ]
-
-    for strip_index, strip_start in enumerate(strip_offsets):
-
-        if strip_index + 1 < strip_count:
-            strip_end = strip_offsets[strip_index + 1]
-        else:
-            strip_end = smap_length
-
-        if strip_start >= strip_end:
-            raise ValueError(
-                f"Strip {strip_index}: invalid range "
-                f"{strip_start}..{strip_end}."
-            )
-
-        compression_code = bm_raw[strip_start]
-
-        if compression_code != 0x0A:
-            raise ValueError(
-                f"Strip {strip_index}: unsupported compression "
-                f"code 0x{compression_code:02X}."
-            )
-
-        strip_payload = bm_raw[
-            strip_start + 1:strip_end
-        ]
-
-        columns, bytes_used = decode_strip_ega(
-            strip_payload,
-            height
-        )
-
-        if bytes_used != len(strip_payload):
-            raise ValueError(
-                f"Strip {strip_index}: decoder used {bytes_used} "
-                f"of {len(strip_payload)} payload bytes."
-            )
-
-        base_x = strip_index * 8
-
-        for column_index in range(8):
-            x = base_x + column_index
-
-            for y in range(height):
-                pixels[y][x] = columns[column_index][y]
-
-    # Create indexed-colour image.
-    image = Image.new(
-        'P',
-        (width, height)
-    )
-
-    flat_pixels = [
-        pixel
-        for row in pixels
-        for pixel in row
-    ]
-
-    image.putdata(flat_pixels)
-
-    # Pillow palettes must contain up to 256 RGB entries.
-    # We use source palette entries 16-31 as PNG entries 0-15.
-    png_palette = []
-
-    for r, g, b in palette_rgb[16:32]:
-        png_palette.extend([r, g, b])
-
-    # Pad remaining palette entries to 256 colours.
-    png_palette.extend(
-        [0, 0, 0] * (256 - 16)
-    )
-
-    image.putpalette(png_palette)
-
-    output_dir = os.path.join(
-        ROOMS_OUTPUT_DIR,
-        f"disk{disk_number:02}"
-    )
-
-    os.makedirs(
-        output_dir,
-        exist_ok=True
-    )
-
-    filename = os.path.join(
-        output_dir,
-        f'room_{file_number:02}.png'
-    )
-
-    image.save(
-        filename,
-        optimize=True,
-        bits=4
-    )
-
-    print(
-        f"  Indexed room image saved as '{filename}' "
-        f"({width}x{height}, 16 colours)"
-    )
-
-
-def save_object_image(
-    bitmap_data,
-    strip_offsets,
-    smap_length,
-    width,
-    height,
-    palette_rgb,
-    file_number,
-    object_id,
-    disk_number
-):
-    """
-    Decode and save one Amiga SCUMM object image.
-
-    The object consists of 8-pixel-wide BMCOMP_PIX32 strips using
-    the same 4-bit colour decoding as room backgrounds.
-
-    Args:
-        bitmap_data: OI bitmap payload containing the strip table.
-        strip_offsets: Offsets of compressed image strips.
-        smap_length: Length of the object's bitmap data.
-        width: Derived object width in pixels.
-        height: Derived object height in pixels.
-        palette_rgb: Palette obtained from the containing room.
-        file_number: Sequential LF index containing the object.
-        object_id: SCUMM object identifier stored in the OI.
-        disk_number: Source disk number.
-    """
-
-    pixels = [
-        [0 for _ in range(width)]
-        for _ in range(height)
-    ]
-
-    strip_count = len(strip_offsets)
-
-    for strip_index, strip_start in enumerate(
-        strip_offsets
-    ):
-
-        if strip_index + 1 < strip_count:
-            strip_end = strip_offsets[
-                strip_index + 1
-            ]
-        else:
-            strip_end = smap_length
-
-        compression_code = bitmap_data[
-            strip_start
-        ]
-
-        if compression_code != 0x0A:
-            raise ValueError(
-                f"Object {object_id}, strip "
-                f"{strip_index}: unsupported "
-                f"compression code "
-                f"0x{compression_code:02X}."
-            )
-
-        strip_payload = bitmap_data[
-            strip_start + 1:strip_end
-        ]
-
-        columns, bytes_used = decode_strip_ega(
-            strip_payload,
-            height
-        )
-
-        if bytes_used != len(strip_payload):
-            raise ValueError(
-                f"Object {object_id}, strip "
-                f"{strip_index}: decoder used "
-                f"{bytes_used} of "
-                f"{len(strip_payload)} bytes."
-            )
-
-        base_x = strip_index * 8
-
-        for column_index in range(8):
-
-            x = base_x + column_index
-
-            for y in range(height):
-                pixels[y][x] = (
-                    columns[column_index][y]
-                )
-
-    image = Image.new(
-        "P",
-        (width, height)
-    )
-
-    image.putdata(
-        [
-            pixel
-            for row in pixels
-            for pixel in row
-        ]
-    )
-
-    # As with BM room backgrounds, decoded values 0-15
-    # map to source room palette entries 16-31.
-    png_palette = []
-
-    for r, g, b in palette_rgb[16:32]:
-        png_palette.extend(
-            [r, g, b]
-        )
-
-    png_palette.extend(
-        [0, 0, 0] * (256 - 16)
-    )
-
-    image.putpalette(
-        png_palette
-    )
-
-    output_dir = os.path.join(
-        "Objects",
-        f"disk{disk_number:02}",
-        f"room_{file_number:02}"
-    )
-
-    os.makedirs(
-        output_dir,
-        exist_ok=True
-    )
-
-    filename = os.path.join(
-        output_dir,
-        f"object_{object_id:03}.png"
-    )
-
-    image.save(
-        filename,
-        optimize=True,
-        bits=4
-    )
-
-    print(
-        f"  Indexed object image saved as "
-        f"'{filename}' "
-        f"({width}x{height}, 16 colours)"
-    )
-
-
-def parse_oi(
-    oi_data,
-    file_number,
-    palette_rgb,
-    disk_number
-):
-    """
-    Parse and decode an OI (Object Image) resource.
-
-    Amiga object images use the same 8-pixel-wide BMCOMP_PIX32
-    strip compression as the main room BM graphics.
-
-    The object width is derived from the strip-offset table.
-    The height is inferred by finding the value for which every
-    compressed strip decodes completely and consumes exactly its
-    available payload.
-
-    Args:
-        oi_data: Complete OI chunk, including its chunk header.
-        file_number: Sequential index of the containing LF resource.
-        palette_rgb: Palette obtained from the room's PA chunk.
-        disk_number: Source disk number.
-    """
-
-    if len(oi_data) < 12:
-        print("  OI chunk too short to contain image data.")
-        return
-
-    print("\n  >>> parse_oi() called")
-
-    oi_size = int.from_bytes(
-        oi_data[0:4],
-        "little"
-    )
-
-    oi_id = oi_data[4:6].decode(
-        "ascii",
-        errors="replace"
-    )
-
-    object_id = int.from_bytes(
-        oi_data[6:8],
-        "little"
-    )
-
-    print(f"  Declared OI size: {oi_size} bytes")
-    print(f"  Header found: '{oi_id}'")
-    print(f"  Object ID: {object_id}")
-
-    if oi_id != "OI":
-        print("  Invalid OI header.")
-        return
-
-    # Bitmap data begins after the OI header and object ID.
-    bitmap_data = oi_data[8:]
-
-    if len(bitmap_data) < 8:
-        print("  OI contains no usable bitmap data.")
-        return
-
-    smap_length = int.from_bytes(
-        bitmap_data[0:4],
-        "little"
-    )
-
-    first_strip_offset = int.from_bytes(
-        bitmap_data[4:8],
-        "little"
-    )
-
-    # Strip table:
-    #
-    #   4-byte SMAP length
-    #   N × 4-byte strip offsets
-    #
-    # Therefore:
-    #
-    #   first_strip_offset = 4 + (N * 4)
-    #
-    if first_strip_offset < 8:
-        print(
-            f"  Invalid first strip offset: "
-            f"{first_strip_offset}"
-        )
-        return
-
-    if (first_strip_offset - 4) % 4 != 0:
-        print(
-            "  First strip offset does not describe "
-            "a valid strip table."
-        )
-        return
-
-    strip_count = (
-        first_strip_offset - 4
-    ) // 4
-
-    width = strip_count * 8
-
-    print(f"  SMAP length: {smap_length} bytes")
-    print(f"  Strip count: {strip_count}")
-    print(f"  Derived width: {width} pixels")
-
-    strip_offsets = []
-
-    for strip_index in range(strip_count):
-        offset_pos = 4 + strip_index * 4
-
-        strip_offset = int.from_bytes(
-            bitmap_data[
-                offset_pos:offset_pos + 4
-            ],
-            "little"
-        )
-
-        strip_offsets.append(strip_offset)
-
-    # Confirm that the object uses the compression format
-    # supported by our existing Amiga decoder.
-    for strip_index, strip_offset in enumerate(
-        strip_offsets
-    ):
-        if strip_offset >= len(bitmap_data):
-            print(
-                f"  Strip {strip_index} offset "
-                f"{strip_offset} is outside OI data."
-            )
-            return
-
-        compression_code = bitmap_data[
-            strip_offset
-        ]
-
-        if compression_code != 0x0A:
-            print(
-                f"  Strip {strip_index}: unsupported "
-                f"compression code "
-                f"0x{compression_code:02X}."
-            )
-            return
-
-    # Infer image height.
-    #
-    # A valid height must allow EVERY strip to:
-    #
-    #   1. decode exactly eight columns, and
-    #   2. consume its entire compressed payload.
-    #
-    valid_heights = []
-
-    for candidate_height in range(1, 257):
-
-        valid = True
-
-        for strip_index, strip_start in enumerate(
-            strip_offsets
-        ):
-
-            if strip_index + 1 < strip_count:
-                strip_end = strip_offsets[
-                    strip_index + 1
-                ]
-            else:
-                strip_end = smap_length
-
-            strip_payload = bitmap_data[
-                strip_start + 1:strip_end
-            ]
-
-            try:
-                _, bytes_used = decode_strip_ega(
-                    strip_payload,
-                    candidate_height
-                )
-
-            except ValueError:
-                valid = False
-                break
-
-            if bytes_used != len(strip_payload):
-                valid = False
-                break
-
-        if valid:
-            valid_heights.append(
-                candidate_height
-            )
-
-    if len(valid_heights) != 1:
-        print(
-            "  Unable to determine a unique object "
-            f"height. Candidates: {valid_heights}"
-        )
-        return
-
-    height = valid_heights[0]
-
-    print(f"  Derived height: {height} pixels")
-    print(
-        f"  Object image dimensions: "
-        f"{width} x {height}"
-    )
-
-    save_object_image(
-        bitmap_data,
-        strip_offsets,
-        smap_length,
-        width,
-        height,
-        palette_rgb,
-        file_number,
-        object_id,
-        disk_number
-    )
-
-
-def parse_bm(
-    bm_data,
-    file_number,
-    width,
-    height,
-    palette_rgb,
-    disk_number
-):
-    """
-    Parse and decode the main BM room-background resource.
-
-    Reads the bitmap payload and its SMAP-style strip-offset table.
-    Each room is divided into 8-pixel-wide compressed strips whose
-    first byte identifies the compression method. The strip table and
-    room information are passed to save_room_image() for reconstruction.
-
-    Additional diagnostic output is produced to document the strip
-    structure, compression bytes, and first-strip decoding behaviour
-    used while reverse-engineering the Amiga bitmap format.
-
-    Args:
-        bm_data: Complete BM chunk, including its chunk header.
-        file_number: Sequential index of the embedded file on this disk.
-        width: Room width obtained from the HD chunk.
-        height: Room height obtained from the HD chunk.
-        palette_rgb: Room palette obtained from the PA chunk.
-        disk_number: Source disk number.
-    """
-    print("  >>> parse_bm() called")
-    bm_size = int.from_bytes(bm_data[0:4], 'little')
-    print(f"  Declared size: {bm_size} bytes")
-
-    header = bm_data[4:6].decode('ascii', errors='replace')
-    print(f"  Header found: '{header}'")
-
-    bm_raw = bm_data[6:]
-    print(f"  bm_raw: {len(bm_raw)}")
-
-    # Show first 10 bytes in hex and ASCII
-    hex_bytes = ' '.join(f'{b:02X}' for b in bm_raw[:10])
-    ascii_chars = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in bm_raw[:10])
-    print(f"  First 10 bytes (hex):   {hex_bytes}")
-    print(f"  First 10 bytes (ASCII): {ascii_chars}")
-
-    strip_count = (width + 7) // 8
-
-    smap_length = int.from_bytes(
-        bm_raw[0:4],
-        'little'
-    )
-
-    print(f"  SMAP length: {smap_length} bytes")
-    print(f"  Room requires {strip_count} strips")
-
-    strip_offsets = []
-
-    for strip_index in range(strip_count):
-        offset_pos = 4 + strip_index * 4
-
-        strip_offset = int.from_bytes(
-            bm_raw[offset_pos:offset_pos + 4],
-            'little'
-        )
-
-        strip_offsets.append(strip_offset)
-
-        print(
-            f"    Strip {strip_index:02}: "
-            f"offset {strip_offset}"
-        )
-
-    try:
-        save_room_image(
-            bm_raw,
-            strip_offsets,
-            smap_length,
-            width,
-            height,
-            palette_rgb,
-            file_number,
-            disk_number
-        )
-
-    except ValueError as error:
-        print(
-            f"  Room image decode failed: {error}"
-        )
-
-    strip_index = 0
-    strip_start = strip_offsets[strip_index]
-    strip_end = strip_offsets[strip_index + 1]
-
-    compression_code = bm_raw[strip_start]
-    strip_payload = bm_raw[strip_start + 1:strip_end]
-
-    try:
-        decoded_columns, bytes_used = decode_strip_ega(
-            strip_payload,
-            height
-        )
-
-        print()
-        print("  Decoded strip check")
-        print(f"    Columns decoded:    {len(decoded_columns)}")
-        print(f"    Pixels per column:  {height}")
-        print(f"    Total pixels:       {8 * height}")
-        print(f"    Payload bytes used: {bytes_used}")
-        print(f"    Payload bytes avail:{len(strip_payload)}")
-
-        print("    First 16 pixels of each column:")
-
-        for column_index, column in enumerate(decoded_columns):
-            pixels = ' '.join(
-                f'{value:02d}'
-                for value in column[:16]
-            )
-
-            print(
-                f"      Column {column_index}: {pixels}"
-            )
-
-    except ValueError as error:
-        print()
-        print(f"  Strip decode failed: {error}")
-
-    print()
-    print("  Chunk check - first strip")
-    print(f"    Strip index:       {strip_index}")
-    print(f"    Strip start:       {strip_start}")
-    print(f"    Strip end:         {strip_end}")
-    print(f"    Total strip bytes: {strip_end - strip_start}")
-    print(f"    Compression code:  0x{compression_code:02X}")
-    print(f"    Payload bytes:     {len(strip_payload)}")
-
-    preview = ' '.join(f'{b:02X}' for b in strip_payload[:32])
-    print(f"    First 32 payload bytes:")
-    print(f"      {preview}")
-
-    print("  Strip compression bytes:")
-
-    for strip_index, strip_offset in enumerate(strip_offsets):
-        compression_code = bm_raw[strip_offset]
-
-        print(
-            f"    Strip {strip_index:02}: "
-            f"offset {strip_offset}, "
-            f"compression byte = 0x{compression_code:02X} "
-            f"({compression_code})"
-        )
-
-    expected_first_offset = 4 + strip_count * 4
-
-    print(
-        f"  Expected first strip offset: "
-        f"{expected_first_offset}"
-    )
-
-    print(
-        f"  Actual first strip offset:   "
-        f"{strip_offsets[0]}"
     )
 
 
