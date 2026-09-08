@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software in your work, please cite it as below."
+title: "MonkeyIslandAmigaGraphics"
+type: software
+authors:
+  - family-names: "Skelly"
+    given-names: "Jason"
+    alias: "XtC"
+repository-code: "https://github.com/AmigaGuide/MonkeyIslandAmigaGraphics"
+license: "GPL-3.0-or-later"
+version: "1.2.0"
+date-released: "2026-09-07"
+abstract: >-
+  A Python utility for extracting room backgrounds, object images and
+  costume animation cels directly from the resource files of the Amiga
+  version of The Secret of Monkey Island.
