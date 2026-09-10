@@ -39,7 +39,7 @@ A complete validation run identified 3,126 candidate costume cels. Of these, 3,1
 
 Room backgrounds are deliberately exported without object or costume graphics composited over them, preserving the clean background artwork as stored in the game resources.
 
-Development will continue with the aim of identifying and extracting additional graphical resources where practical.
+Version 1.2.0 represents the current completed extraction milestone for the project. Further graphical resource types may be investigated in the future where practical.
 
 
 ## Requirements
@@ -221,6 +221,28 @@ Version 1.2.0 adds extraction of `CO` costume resources, including individual an
 The longer-term aim is to extract as much of the original Amiga graphical artwork as practical while retaining the individual resources rather than compositing them into reconstructed screenshots.
 
 
+## Related Project
+
+Development continued with [**MonkeyIsland2AmigaGraphics**](https://github.com/AmigaGuide/MonkeyIsland2AmigaGraphics), a companion project for extracting graphical resources from the Amiga version of *Monkey Island 2: LeChuck's Revenge*.
+
+Although the two games use different versions of the SCUMM engine and substantially different resource structures and graphical formats, the investigation and extraction work carried out for **MonkeyIslandAmigaGraphics** provided the foundation for the later project.
+
+The *Monkey Island 2* extractor extends the work to SCUMM v5 resources and supports room backgrounds, object image states, costume animation cels, character sets, palette reference images and Z-plane occlusion masks.
+
+
+## Background
+
+The idea behind this project originated in 2022, with the aim of extracting the original background artwork from the Amiga version of *The Secret of Monkey Island*.
+
+During the early investigation, the author attempted to contact the ExoticA team and subsequently contacted Stuart Caie (Kyzer), whose extensive experience with Amiga data formats and compression made him an obvious person to approach. Kyzer expressed an interest in the project and provided encouragement during its early stages.
+
+Development was later resumed following the completion of the author's Open University commitments.
+
+The project subsequently developed into a broader investigation of the Amiga SCUMM resources, extending beyond the original goal of extracting room backgrounds to include object images and costume animation cels.
+
+The techniques and knowledge gained during this work later provided the foundation for the companion **MonkeyIsland2AmigaGraphics** project.
+
+
 ## ScummVM
 
 The ScummVM source code has been used as an important reference for
@@ -254,6 +276,20 @@ SCUMM Revisited does not decode the Amiga graphical resources extracted
 by this project, but its resource browser and HexView were valuable tools
 during investigation of the original data.
 
+
+## Development with ChatGPT
+
+ChatGPT (OpenAI), affectionately referred to during development as **Chat Chippy Tea™**, was used extensively as a development and research assistant throughout the project.
+
+Its role included helping to analyse SCUMM resource structures, interpret relevant ScummVM C++ implementations, translate decoding behaviour into standalone Python, investigate binary resource data, debug extraction routines and assist with documentation.
+
+The development process remained empirical throughout. The original Amiga game resources were parsed and tested locally, extracted graphics were visually inspected, resource counts and decoder behaviour were validated, and results were compared where useful with SCUMM Revisited and the behaviour documented by ScummVM.
+
+The author supplied the game resources used during development, performed the extraction and validation runs, visually inspected the generated artwork, identified anomalous results, compared resources using external tools and made the final implementation and project decisions.
+
+ChatGPT did not provide or supply any original game data.
+
+
 ## Game Data and Copyright
 
 Original game data files are **not included** with this project. A small number of extracted PNG images are included solely as examples of the program's output.
@@ -264,7 +300,7 @@ Users must provide their own legally obtained copy of the relevant game data.
 
 ## Licence
 
-This project is distributed under the terms of the **GNU General Public License version 3 or later (GPLv3+)**.
+This project is distributed under the terms of the **GNU General Public License version 3 (GPL-3.0)**.
 
 See the `LICENSE` file for details.
 
@@ -272,4 +308,7 @@ See the `LICENSE` file for details.
 
 * The ScummVM project and its contributors for their extensive work documenting and implementing support for the SCUMM engine.
 * SCUMM Revisited and its developers for providing a valuable resource inspection tool and terminology reference during development.
+* The ExoticA contributors and community for their long-standing work preserving and documenting Amiga software and music.
+* Stuart Caie (Kyzer) for his interest in and encouragement of the project during its early investigation.
+* OpenAI's ChatGPT — affectionately known during development as **Chat Chippy Tea™** — for assistance with reverse engineering, Python implementation, debugging and documentation.
 * Lucasfilm Games / LucasArts for *The Secret of Monkey Island*.
